@@ -1,0 +1,62 @@
+{
+  "name": "@zakkster/lite-map",
+  "version": "1.0.0",
+  "description": "Zero-GC keyed list reconciliation for @zakkster/lite-signal: mapArray and indexArray that MOVE and REBIND per-item reactive scopes instead of rebuilding them, reusing retired scopes from a free-list so steady-state list churn never grows the pool.",
+  "type": "module",
+  "main": "./Map.js",
+  "module": "./Map.js",
+  "types": "./Map.d.ts",
+  "exports": {
+    ".": {
+      "node": "./Map.js",
+      "types": "./Map.d.ts",
+      "import": "./Map.js",
+      "default": "./Map.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "Map.js",
+    "Map.d.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "llms.txt",
+    "LICENSE.txt"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "@zakkster/lite-signal": ">=1.6.0-preview.0"
+  },
+  "keywords": [
+    "reactive",
+    "signals",
+    "list",
+    "reconciliation",
+    "keyed",
+    "for",
+    "map-array",
+    "index-array",
+    "zero-gc",
+    "esm",
+    "lite-signal"
+  ],
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-map.git"
+  },
+  "homepage": "https://github.com/PeshoVurtoleta/lite-map#readme",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

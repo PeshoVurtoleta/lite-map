@@ -1,0 +1,88 @@
+# @zakkster/lite-map
+
+> Zero-GC keyed list reconciliation for @zakkster/lite-signal: mapArray and
+> indexArray that MOVE and REBIND per-item reactive scopes instead of rebuilding
+> them, reusing retired scopes from a free-list so steady-state list churn never
+> grows the engine pool.
+
+Map a reactive array to one reactive scope per item. List mutation moves and
+rebinds scopes; only changed items recompute. The differentiator vs Solid's
+mapArray: removed items' scopes go to a free-list and are REUSED by later
+inserts, so churn over a bounded set pulls nothing from the pool.
+
+Peer dependency: @zakkster/lite-signal ^1.6.0-preview.0 (uses createScope, the
+detached per-item-subtree disposal primitive). ESM only. DOM-free. MIT.
+
+## The fork this ships
+
+By-accessor: the CHANGING dimension is always an accessor. That is what lets a
+retired scope be reused for a new item by setting its signals (no rebuild). A
+by-value mapArray (item as a plain value) cannot reuse a scope for a new item, so
+its inserts pull from the pool -- it is a planned opt-in, NOT in 1.0.
+
+## Entry points
+
+- createMapper(reg) -> { mapArray, indexArray }   // bind to any registry >=1.6.0-preview.0
+- mapArray(list, mapFn, opts?)                     // default registry, item-keyed
+- indexArray(list, mapFn, opts?)                   // default registry, position-keyed
+
+## indexArray(list, (item, index) => O, { maxPool? })
+
+- POSITION-keyed. `item` is an accessor (the value at this slot); `index` is a
+  plain number (the slot is stable).
+- Value churn at a stable length = itemSig.set per changed slot. Zero-GC.
+- Grow appends; shrink parks tail slots to a LIFO free-pool; tail re-grow reuses a
+  parked slot when its index matches (push/pop at the end is zero-GC). A reused
+  slot whose index would not match is disposed + rebuilt (keeps the plain `index`
+  correct). maxPool caps retained parked slots.
+
+## mapArray(list, (item, index) => O, { key?, maxPool? })
+
+- ITEM-keyed. BOTH `item` and `index` are accessors.
+- key: identity selector, default reference identity (the item). Keys must be
+  unique within the list.
+- Survivor reused in place; if it moved, idxSig.set (zero-GC); if its item changed
+  under a stable key, itemSig.set. Removed -> retired to the free-list. New -> a
+  retired scope reused via itemSig.set + idxSig.set (zero-GC when the pool is
+  warm), else built. maxPool caps retained retired scopes.
+
+## Returned accessor: Mapped<O>
+
+- mapped() -> O[]   the outputs in source order. ONE persistent array, mutated in
+  place (zero per-change allocation): read fresh each run; do not retain or
+  reference-compare. Fires only on a real structural change (membership/order),
+  not on value-only churn.
+- mapped.dispose()   stop the driver, dispose every live + parked scope (including
+  the item/index signals the scope does not own) and the output signal.
+
+## Ownership
+
+- Each item owns a createScope() scope; its mapFn effects/computeds are cascaded
+  on disposal. Per-item scopes AND the reconcile driver are detached from the
+  caller (createRoot/createScope), so an enclosing scope re-running never tears
+  the list down. The caller owns teardown via mapped.dispose() -- there is no
+  auto-cleanup.
+
+## Zero-GC (engine pool counters), and the honest non-claims
+
+PASS (poolGrowths / totalAllocations flat after warm-up, verified):
+- indexArray value churn at a stable length (20k updates flat).
+- mapArray reorder/move (idxSig.set on shifted survivors).
+- mapArray warm-pool insert/remove churn (5k iters flat).
+- indexArray tail grow/shrink via the free-pool.
+NOT claimed:
+- Growth past the previous high-water mark pulls scopes from the pool.
+- The keyed byKey Map mutates (set/delete) on actual key changes -- a JS
+  allocation the pool counters do not see. Reorder touches no key, so no Map churn.
+- The user's mapFn body (its allocations are the caller's).
+
+## Gotchas
+
+- createScope cascades effects/computeds but NOT signals (the engine never
+  owner-adopts signals). lite-map disposes the item/index signals it creates. A
+  BARE signal you create inside mapFn is NOT auto-disposed on scope teardown --
+  prefer effects/computeds (which ARE cascaded), or dispose it yourself.
+- Call mapArray/indexArray once at setup; reading the returned accessor is the
+  reactive surface. Disposal is explicit (mapped.dispose()).
+- Deferred to a later minor: by-value mapArray, LIS minimal-move ordering (1.0
+  moves are correct but not minimal), append/pop fast-paths.
