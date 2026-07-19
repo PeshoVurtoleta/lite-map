@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lite-map &mdash; tail fast-paths</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+<!-- Direct import from source. `npm install` once in this folder, then serve it
+     over http (e.g. `npx serve`) and open the served URL. -->
+<script type="importmap">
+{
+  "imports": {
+    "@zakkster/lite-signal": "../node_modules/@zakkster/lite-signal/Signal.js",
+    "@zakkster/lite-map": "../Map.js"
+  }
+}
+</script>
+
+<style>
+:root{
+  --bg:#0b0c0e; --panel:#131519; --panel-2:#0e1013;
+  --line:rgba(255,255,255,.07); --line-strong:rgba(255,255,255,.16);
+  --text:#d8d6d2; --dim:#8b8d94; --faint:#555960;
+  --green:#5fe39f; --green-dim:#2b7a52; --cyan:#7dd3fc; --amber:#f5b942;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:'JetBrains Mono',ui-monospace,monospace; font-size:13px; line-height:1.5;
+  padding:28px clamp(14px,4vw,48px) 60px;
+  background-image:radial-gradient(900px 380px at 50% -8%, rgba(95,227,159,.06), transparent 70%);
+}
+h1,h2{font-family:'Space Mono','JetBrains Mono',monospace; font-weight:700; margin:0}
+h1{font-size:22px; letter-spacing:.5px}
+h1 .v{color:var(--green); font-size:14px}
+.tagline{color:var(--dim); margin:6px 0 0; max-width:74ch}
+.tagline b{color:var(--text); font-weight:500}
+
+.stat{display:flex; flex-wrap:wrap; gap:12px; margin:22px 0 16px}
+.chip{border:1px solid var(--line-strong); border-radius:8px; padding:9px 14px; background:var(--panel-2); min-width:150px}
+.chip .lab{color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.6px}
+.chip .val{font-family:'Space Mono',monospace; font-weight:700; font-size:18px; color:var(--green)}
+.chip.flat .val{color:var(--green)}
+.chip.warn .val{color:var(--amber)}
+
+.controls{display:flex; flex-wrap:wrap; gap:9px; margin:0 0 18px}
+button{
+  font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--text);
+  background:var(--panel); border:1px solid var(--line-strong); border-radius:7px;
+  padding:9px 14px; cursor:pointer; transition:border-color .2s,color .2s,background .2s;
+}
+@media (hover:hover){button:hover{border-color:var(--green-dim); color:var(--green)}}
+button.primary{border-color:var(--green-dim); color:var(--green)}
+button.active{background:linear-gradient(0deg,rgba(95,227,159,.08),transparent); border-color:var(--green-dim); color:var(--green)}
+
+.feed{border:1px solid var(--line); border-radius:10px; background:var(--panel-2); padding:8px; max-height:60vh; overflow:auto}
+.feed .row{
+  display:grid; grid-template-columns:56px 1fr 92px; align-items:center; gap:10px;
+  padding:7px 10px; border-bottom:1px solid var(--line);
+}
+.feed .row:last-child{border-bottom:0}
+.feed .id{color:var(--faint); font-size:11px}
+.feed .msg{color:var(--text)}
+.feed .renders{justify-self:end; font-size:11px; color:var(--dim)}
+.feed .renders b{color:var(--green); font-weight:700}
+.row.fresh{animation:flash .5s ease-out}
+@keyframes flash{from{background:rgba(95,227,159,.14)}to{background:transparent}}
+
+.note{color:var(--dim); margin:18px 0 0; max-width:82ch}
+.note code{color:var(--cyan); background:var(--panel); padding:1px 6px; border-radius:4px}
+.note b{color:var(--text); font-weight:500}
+#fail{display:none; margin-top:18px; color:#f87171; border:1px solid #7f1d1d; border-radius:8px; padding:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>@zakkster/lite-map <span class="v">v1.1.0</span></h1>
+  <p class="tagline">Zero-GC keyed list reconciliation. This feed is a <b>mapArray</b>: each row owns one scope.
+    <b>Append</b> and <b>pop</b> hit the 1.1 <b>tail fast-paths</b> &mdash; only the tail row mounts or retires; every
+    surviving row keeps its scope (its render count never ticks) and the signal pool stays flat.</p>
+</header>
+
+<section class="stat">
+  <div class="chip"><div class="lab">rows</div><div class="val" id="s-rows">0</div></div>
+  <div class="chip"><div class="lab">last op mounted</div><div class="val" id="s-mounts">0</div></div>
+  <div class="chip" id="chip-pool"><div class="lab">pool alloc (last op)</div><div class="val" id="s-alloc">0</div></div>
+  <div class="chip"><div class="lab">total appends</div><div class="val" id="s-appends">0</div></div>
+</section>
+
+<div class="controls">
+  <button class="primary" id="b-push">Append 1 (push)</button>
+  <button id="b-push10">Append 10</button>
+  <button id="b-pop">Pop oldest</button>
+  <button id="b-touch">Edit newest (value churn)</button>
+  <button id="b-auto">Auto-feed (5/sec)</button>
+  <button id="b-clear">Clear</button>
+</div>
+
+<div class="feed" id="feed"></div>
+
+<p class="note">
+  Each row's <b>render count</b> is incremented by its own effect. Append and pop leave the whole prefix
+  untouched &mdash; watch every existing row hold its count at <b>1</b> while only the new/edited row ticks.
+  The <b>pool alloc (last op)</b> chip reads lite-signal's <code>stats()</code>: append reuses a parked scope
+  from a prior pop (zero alloc once warm), so a long push/pop cycle never grows the pool. A non-tail edit
+  (prepend, reorder) would fall through to the general keyed diff &mdash; still correct, just not the fast path.
+</p>
+
+<div id="fail">Demo failed to start &mdash; check the console. Did you <code>npm install</code> and serve over http?</div>
+
+<script type="module">
+import { createRegistry } from "@zakkster/lite-signal";
+import { createMapper } from "@zakkster/lite-map";
+
+// Explicit roomy registry so the feed can grow past the default 1,024-node cap;
+// source signal, row effects, mapper and stats all share it.
+const R = createRegistry({ maxNodes: 1 << 18, maxLinks: 1 << 20, onCapacityExceeded: "grow" });
+const { mapArray } = createMapper(R);
+
+const $ = (id) => document.getElementById(id);
+const $feed = $("feed"), $rows = $("s-rows"), $mounts = $("s-mounts"), $alloc = $("s-alloc"),
+      $appends = $("s-appends"), $chipPool = $("chip-pool");
+
+const MSGS = ["user signed in", "cache warmed", "frame rendered", "socket ping", "job queued",
+              "row committed", "signal fired", "scope parked", "batch flushed", "gc gate passed"];
+
+let nextId = 0, mountCount = 0, appends = 0, autoId = null;
+const rand = () => MSGS[(Math.random() * MSGS.length) | 0];
+const mkRow = () => ({ id: nextId++, msg: rand(), v: 0 });
+
+// source list (newest at the tail) + the mapArray projection
+const list = R.signal([]);
+// mapFn: build the row DOM once per CREATED scope; a reused/surviving scope keeps
+// its element and its render count -> tail ops never re-render the prefix.
+const view = mapArray(list, (itemAcc) => {
+    mountCount++;
+    const el = document.createElement("div");
+    el.className = "row fresh";
+    let renders = 0;
+    const idEl = document.createElement("span"); idEl.className = "id";
+    const msgEl = document.createElement("span"); msgEl.className = "msg";
+    const rEl = document.createElement("span"); rEl.className = "renders";
+    el.append(idEl, msgEl, rEl);
+    // one effect binds this row's reactive item; only THIS row's edits re-run it.
+    R.effect(() => {
+        const it = itemAcc();
+        renders++;
+        idEl.textContent = "#" + it.id;
+        msgEl.textContent = it.msg + (it.v ? "  (edited \u00d7" + it.v + ")" : "");
+        rEl.innerHTML = "renders <b>" + renders + "</b>";
+    });
+    setTimeout(() => el.classList.remove("fresh"), 500);
+    return el;
+}, { key: (it) => it.id });
+
+// render the feed from the mapped element list (order-stable, tail-appended)
+R.effect(() => {
+    const els = view();               // array of row elements, in source order
+    $feed.replaceChildren(...els);
+    $rows.textContent = String(els.length);
+});
+
+// wrap a mutation to report mounts + pool delta for that single op
+function op(mutate) {
+    mountCount = 0;
+    const b = R.stats();
+    mutate();
+    const a = R.stats();
+    const alloc = a.totalAllocations - b.totalAllocations;
+    $mounts.textContent = String(mountCount);
+    $alloc.textContent = String(alloc);
+    $chipPool.className = alloc === 0 ? "chip flat" : "chip warn";
+}
+
+const push = (n) => op(() => { const arr = list.peek().slice(); for (let i = 0; i < n; i++) { arr.push(mkRow()); appends++; } list.set(arr); $appends.textContent = String(appends); });
+const pop = () => op(() => { const arr = list.peek().slice(); arr.shift(); list.set(arr); });   // drop oldest (prefix) -> general path
+const popTail = () => op(() => { const arr = list.peek().slice(); arr.pop(); list.set(arr); });  // drop newest (tail fast-path)
+const touch = () => op(() => { const arr = list.peek().slice(); if (!arr.length) return; const i = arr.length - 1; arr[i] = { ...arr[i], v: arr[i].v + 1 }; list.set(arr); });
+const clear = () => op(() => list.set([]));
+
+$("b-push").onclick = () => push(1);
+$("b-push10").onclick = () => push(10);
+$("b-pop").onclick = popTail;              // pop the newest -> demonstrates the pop fast-path
+$("b-touch").onclick = touch;
+$("b-clear").onclick = clear;
+$("b-auto").onclick = (e) => {
+    if (autoId === null) { autoId = setInterval(() => { push(1); if (list.peek().length > 40) popTail(); }, 200); e.target.classList.add("active"); e.target.textContent = "Auto-feed (running\u2026)"; }
+    else { clearInterval(autoId); autoId = null; e.target.classList.remove("active"); e.target.textContent = "Auto-feed (5/sec)"; }
+};
+
+try { push(6); } catch (err) { $("fail").style.display = "block"; console.error(err); }
+</script>
+</body>
+</html>

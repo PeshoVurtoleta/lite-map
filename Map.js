@@ -1,5 +1,5 @@
 /**
- * @zakkster/lite-map v1.0.0 -- zero-GC keyed list reconciliation for
+ * @zakkster/lite-map v1.1.0 -- zero-GC keyed list reconciliation for
  * @zakkster/lite-signal.
  * -----------------------------------------------------------------------------
  * Map a reactive array to per-item reactive scopes so that list mutation MOVES
@@ -41,6 +41,11 @@
  *   - mapArray reorder / move (idxSig.set on survivors that shifted).
  *   - mapArray insert/remove while the free-list is warm (a retired scope is
  *     reused by setting item/index signals).
+ *   - mapArray tail append / pop / in-place value churn (1.1): a position-aligned
+ *     common-prefix scan classifies these before the general keyed diff, so the
+ *     byKey Map, scope pool and scratch swap never churn -- only O(delta) tail
+ *     work runs. Any non-tail shape (prepend, reorder, middle insert/remove)
+ *     falls through to the general path unchanged.
  *   - indexArray tail grow/shrink serviced by the free-pool (push/pop at the end).
  * NOT claimed:
  *   - List GROWTH past the previous high-water mark pulls scopes from the pool
@@ -202,18 +207,34 @@ export function createMapper(reg) {
         const disposeSlot = (s) => { s.dispose(); dispose(s.itemSig); dispose(s.idxSig); };
 
         // A genuinely-new key: reuse a retired scope (rebind its signals -- zero-GC)
-        // or build one. Either way it joins byKey under its new key.
-        const acquire = (item, index, key) => {
+        // or build one.
+        //
+        // `register` is false for a DUPLICATE key (README: keys must be unique).
+        // Registering a duplicate used to overwrite the byKey entry of the slot
+        // that legitimately owns that key, and the damage OUTLIVED the duplicate:
+        // once the dupe was removed, retire() deleted the entry (it matched the
+        // dupe), leaving the original slot live but unreachable through byKey. The
+        // next reorder then treated a survivor as new and handed it a fresh scope
+        // -- silent identity loss on a key that was unique again by then. An
+        // unregistered duplicate is self-contained: it cannot evict anyone, and
+        // retire()'s `byKey.get(s.key) === s` guard already declines to delete an
+        // entry it does not own.
+        const acquire = (item, index, key, register) => {
             let s;
             if (pool.length !== 0) {
                 s = pool.pop();
+                // A pooled slot must not leave a stale byKey entry behind under its
+                // PREVIOUS key. retire() normally clears it, but it declines when
+                // the entry was overwritten, so re-keying without this check could
+                // strand an entry pointing at a slot that no longer holds that key.
+                if (byKey.get(s.key) === s) byKey.delete(s.key);
                 s.key = key; s.index = index; s.item = item; s.seen = epoch;
                 s.itemSig.set(item);
                 s.idxSig.set(index);
             } else {
                 s = makeSlot(item, index, key);
             }
-            byKey.set(key, s);
+            if (register) byKey.set(key, s);
             return s;
         };
 
@@ -225,6 +246,68 @@ export function createMapper(reg) {
         const reconcile = (arr) => {
             epoch = (epoch + 1) | 0;
             const n = arr.length;
+            const prevN = slots.length;
+
+            // ---- tail fast-paths (1.1) --------------------------------------
+            // Scan the longest position-aligned common PREFIX by key. The
+            // dominant real-world mutations -- append, pop, and in-place value
+            // churn (feeds, logs, push/pop) -- leave the whole prefix intact, so
+            // the general keyed diff below (with its per-item byKey.get, scratch
+            // swap and full retire scan) is skipped: the only structural work is
+            // O(delta) at the tail, and the byKey Map / scope pool never churn.
+            // Detection is a pure key scan with NO side effects, so any non-tail
+            // shape (prepend, reorder, middle insert/remove) falls cleanly
+            // through to the correct general path. The prefix invariant
+            // slots[i].index === i is preserved by every branch, so a survivor
+            // that stays at its index needs no idxSig write.
+            const lim = n < prevN ? n : prevN;
+            let p = 0;
+            while (p < lim && keyOf(arr[p]) === slots[p].key) p++;
+
+            if (p === prevN && p === n) {
+                // Same keys, same order: value-only churn (or a no-op). Refresh
+                // changed values in place; no structural change => `out` is
+                // silent (matches the value-churn contract).
+                for (let i = 0; i < n; i++) {
+                    const s = slots[i]; s.seen = epoch;
+                    const item = arr[i];
+                    if (!Object.is(s.item, item)) { s.itemSig.set(item); s.item = item; }
+                }
+                return;
+            }
+            if (p === prevN && n > prevN) {
+                // Pure append: the prefix is every existing slot; [prevN, n) is
+                // new tail. No reorder, no retire, no scratch swap.
+                for (let i = 0; i < prevN; i++) {
+                    const s = slots[i]; s.seen = epoch;
+                    const item = arr[i];
+                    if (!Object.is(s.item, item)) { s.itemSig.set(item); s.item = item; }
+                }
+                for (let i = prevN; i < n; i++) {
+                    const k = keyOf(arr[i]);
+                    slots[i] = acquire(arr[i], i, k, !byKey.has(k));
+                }
+                o.length = n;
+                for (let i = prevN; i < n; i++) o[i] = slots[i].view;
+                out.set(o);
+                return;
+            }
+            if (p === n && prevN > n) {
+                // Pure pop: the prefix is every surviving slot; the old tail
+                // [n, prevN) is retired to the free-list. No reorder, no swap.
+                for (let i = 0; i < n; i++) {
+                    const s = slots[i]; s.seen = epoch;
+                    const item = arr[i];
+                    if (!Object.is(s.item, item)) { s.itemSig.set(item); s.item = item; }
+                }
+                for (let i = n; i < prevN; i++) retire(slots[i]);
+                slots.length = n;
+                o.length = n;
+                out.set(o);
+                return;
+            }
+
+            // ---- general keyed diff (prepend / reorder / middle insert-remove)
             let changed = false;
             for (let i = 0; i < n; i++) {
                 const item = arr[i];
@@ -236,7 +319,7 @@ export function createMapper(reg) {
                     if (!Object.is(existing.item, item)) { existing.itemSig.set(item); existing.item = item; }
                     scratch[i] = existing;
                 } else {                                                    // new key (or duplicate)
-                    scratch[i] = acquire(item, i, key);
+                    scratch[i] = acquire(item, i, key, existing === undefined);
                     changed = true;
                 }
             }

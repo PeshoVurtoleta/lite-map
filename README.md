@@ -116,7 +116,11 @@ todos.set([{ id: 2, text: "walk dog" }]);
 todos.set([{ id: 2, text: "walk dog" }, { id: 3, text: "pay rent" }]);
 ```
 
-Keys must be unique within the list. `maxPool` caps how many retired scopes are kept
+Keys must be unique within the list: only the first occurrence of a key is addressable,
+so a duplicate gets a scope of its own but is never reachable by key. Since 1.1 a duplicate
+is *contained* -- it cannot evict the entry of the row that legitimately owns that key, so a
+transient duplicate (an overlapping page, a fanned-out join) can no longer cost a unique key
+its identity once the list is unique again. `maxPool` caps how many retired scopes are kept
 for reuse (default: unbounded).
 
 ---
@@ -220,8 +224,38 @@ createMapper(registry): { mapArray, indexArray }    // bind to a non-default reg
 - **LIS minimal-move ordering** -- 1.0 reorders are correct but not minimal (more
   index updates than the theoretical floor). A longest-increasing-subsequence pass to
   minimize moves is planned.
-- **Append/pop fast-paths** -- the general keyed diff is O(n) and correct; dedicated
-  fast-paths for the common tail mutations are planned.
+
+---
+
+## Tail fast-paths (1.1)
+
+`mapArray` now classifies the dominant real-world mutations -- **append**, **pop**,
+and **in-place value churn** (feeds, logs, push/pop) -- with a position-aligned
+common-prefix scan by key, *before* the general keyed diff. When the whole prefix
+is intact, the general path (its per-item `byKey.get`, scratch swap and full retire
+scan) is skipped: the only structural work is O(delta) at the tail, and the `byKey`
+Map and the scope pool never churn.
+
+```js
+// pure append: every existing row keeps its scope; only the new tail row mounts.
+todos.set([...todos(), { id: 99, text: "new" }]);
+
+// pure pop: the tail row's scope is parked (reused by the next push); survivors
+// are untouched -- their index accessors do not fire.
+todos.set(todos().slice(0, -1));
+
+// same order, changed value: refreshed in place through itemSig; the structural
+// output signal stays silent (only real membership/order changes fire it).
+todos.set(todos().map(t => t.id === 2 ? { ...t, text: "walk dog now" } : t));
+```
+
+Detection is a pure key scan with **no side effects**, so any non-tail shape
+(prepend, reorder, middle insert/remove) falls cleanly through to the correct
+general path -- these fast-paths are strictly a performance layer over identical
+semantics. **Gate:** 10,000 push/pop cycles on a warm list are zero-GC
+(`poolGrowths` / `totalAllocations` flat), and an append to an N-row list preserves
+all N survivor scopes. The prefix scan itself is O(min(n, prevN)) comparisons; the
+*allocation, Map and scope-move* cost is what stays flat versus list length.
 
 ---
 

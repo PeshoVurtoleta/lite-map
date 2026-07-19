@@ -40,11 +40,20 @@ its inserts pull from the pool -- it is a planned opt-in, NOT in 1.0.
 
 - ITEM-keyed. BOTH `item` and `index` are accessors.
 - key: identity selector, default reference identity (the item). Keys must be
-  unique within the list.
+  unique within the list: only the FIRST occurrence of a key is addressable, so a
+  duplicate gets its own scope but is unreachable by key. [1.1] A duplicate is
+  contained -- it is not registered in byKey, so it cannot evict the owner's entry;
+  a transient duplicate no longer costs a unique key its scope once unique again.
 - Survivor reused in place; if it moved, idxSig.set (zero-GC); if its item changed
   under a stable key, itemSig.set. Removed -> retired to the free-list. New -> a
   retired scope reused via itemSig.set + idxSig.set (zero-GC when the pool is
   warm), else built. maxPool caps retained retired scopes.
+- TAIL FAST-PATHS [1.1]: a position-aligned common-prefix scan by key classifies
+  append / pop / same-order value-churn BEFORE the general keyed diff. When the
+  prefix is intact, byKey / scratch swap / full retire scan are skipped -- only
+  O(delta) tail work runs (Map + scope pool never churn). Non-tail shapes
+  (prepend, reorder, middle insert/remove) fall through to the general path.
+  Correctness-preserving: identical results to the general diff. No API change.
 
 ## Returned accessor: Mapped<O>
 
@@ -70,6 +79,9 @@ PASS (poolGrowths / totalAllocations flat after warm-up, verified):
 - mapArray reorder/move (idxSig.set on shifted survivors).
 - mapArray warm-pool insert/remove churn (5k iters flat).
 - indexArray tail grow/shrink via the free-pool.
+- mapArray tail append/pop/value-churn [1.1]: 10k push/pop cycles on a warm list
+  flat; append to an N-list preserves all N survivor scopes (prefix scan is
+  O(min(n,prevN)) comparisons, but allocation/Map/scope-move cost stays flat).
 NOT claimed:
 - Growth past the previous high-water mark pulls scopes from the pool.
 - The keyed byKey Map mutates (set/delete) on actual key changes -- a JS
@@ -85,4 +97,4 @@ NOT claimed:
 - Call mapArray/indexArray once at setup; reading the returned accessor is the
   reactive surface. Disposal is explicit (mapped.dispose()).
 - Deferred to a later minor: by-value mapArray, LIS minimal-move ordering (1.0
-  moves are correct but not minimal), append/pop fast-paths.
+  moves are correct but not minimal). Append/pop tail fast-paths shipped in 1.1.
