@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-map",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Zero-GC keyed list reconciliation for @zakkster/lite-signal: mapArray and indexArray that MOVE and REBIND per-item reactive scopes instead of rebuilding them, reusing retired scopes from a free-list so steady-state list churn never grows the pool.",
   "type": "module",
   "main": "./Map.js",
@@ -24,8 +24,12 @@
     "LICENSE.txt"
   ],
   "scripts": {
-    "test": "node --test",
-    "test:torture": "node bench/torture/maparray-fuzzer.mjs"
+    "test": "node --test test/*_test.mjs",
+    "torture": "node --expose-gc test/torture.mjs",
+    "torture:controls": "node test/controls.mjs",
+    "verify": "npm test && npm run torture && npm run torture:controls",
+    "prepublishOnly": "npm run verify",
+    "fuzz:bench": "node bench/torture/maparray-fuzzer.mjs"
   },
   "peerDependencies": {
     "@zakkster/lite-signal": "^1.6.0-preview.2"
@@ -59,5 +63,10 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@zakkster/lite-gc-profiler": "^1.16.0",
+    "@zakkster/lite-leak": "^1.10.0",
+    "@zakkster/lite-signal": "1.6.0-beta-1"
   }
 }

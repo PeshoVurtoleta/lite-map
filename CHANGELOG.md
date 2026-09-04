@@ -4,6 +4,98 @@ All notable changes to `@zakkster/lite-map` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] -- 2026-09-05
+
+Hygiene release: no behaviour change, no new API. The only `Map.js` change is
+the version-header comment (the reconcile code is byte-identical to 1.1.0). This
+session (C0) stands up the torture gate the suite mandates and makes the two
+feature gaps visible as planned tiers.
+
+### Added -- the mandated torture gate (`npm run torture`)
+
+`test/torture.mjs` is the mandated `node --expose-gc` entry, proving the zero-GC
+claims the suite way -- a `@zakkster/lite-leak` retention witness (T7) and a
+`@zakkster/lite-gc-profiler` heap witness (T6) **over** the engine pool counters,
+not the counters alone. Before this, every gate rode the engine's own
+`poolGrowths` / `totalAllocations` on a `bench/torture/maparray-fuzzer.mjs`
+registry configured `onCapacityExceeded:"grow"` -- which structurally cannot
+report the pool growth it exists to catch (its own NOTE admits it). A pool-flat
+gate on a "grow" registry is a green light over the exact property it protects.
+
+- Tiers (the fixed T0..T9 namespace, sparse): **T0** metamorphic laws
+  (oracle-equality, idempotence, survivor identity, dispose-to-base), **T1**
+  degenerate inputs (edge keys, contained duplicates, empty/single, throwing
+  `keyOf`, non-array source), **T5** differential fuzz descended from the bench
+  fuzzer but on a **pre-grown `"throw"`** registry with the T1 shapes injected,
+  **T6** the zero-alloc gate (`poolGrowths` / `totalAllocations` deltas both 0
+  **and** the gc-profiler report passes, `stabilize:'deep'`,
+  `maxArrayBuffersGrowth:0`; plus the structural floor a heap gate cannot make --
+  a 1000-row rotate-by-1 writes exactly 1000 `idxSig.set`, an adjacent swap
+  exactly 2, and `mapped()` is reference-stable), **T7** a 4096-cycle soak with
+  the lite-leak witness draining to `size()==0`, **T9** controls.
+- **T9 controls + `test/controls.mjs` walk driver.** Every gate ships a
+  deliberately-broken variant that makes the suite exit non-zero for the right
+  reason: a "grow" registry rejected by the fail-closed alloc guard (the M-02 trap
+  made executable), a rebuild-instead-of-reuse allocation the counter catches, an
+  identity-losing diff the Identity line catches (the non-vacuity control), a
+  per-read array allocation the stability check catches, and an allocating loop the
+  gc gate fails (`verdict === 'fail'`, never merely `!ok`). `npm run
+  torture:controls` walks every armable tier armed alone.
+- `test/` and `bench/` stay out of `files[]`; `npm pack --dry-run` proves it (7
+  files in the tarball). New scripts: `torture`, `torture:controls`, `verify`
+  (= `test` + `torture` + `torture:controls`), and `prepublishOnly` (= `verify`).
+
+### Changed
+
+- The `test:torture` script (the bench fuzzer) is renamed **`fuzz:bench`** so
+  `torture` unambiguously names the mandated gate. The bench fuzzer itself is
+  unchanged.
+- The `test` script is scoped to `test/*_test.mjs` (was bare `node --test`):
+  `node --test` auto-discovers every file under `test/`, which now includes the
+  torture entry (it refuses to run without `--expose-gc`). The glob matches
+  exactly the four legacy suites -- still 45 cases, unchanged.
+
+### Decisions recorded
+
+- **M-06 -- the peer stays `^1.6.0-preview.2`.** The registry has NO stable
+  release `>= 1.6.0`: the latest stable is `1.5.0`, the `1.6.x` line ends at
+  `1.6.0-preview.2`, and the rebuild line is at `1.9.0-preview.6`. lite-map is
+  built on `createScope`, which does not exist before the `1.6.0` previews, so the
+  pin cannot widen to any stable. Kept as-is; revisit when a stable `1.6.0` (or the
+  `1.9` rebuild) ships.
+- **A `VERSION` export is declined.** No consumer reads it, and adding one would be
+  new public API surface in a hygiene release. The three-place version sync
+  (`package.json`, the `Map.js` header, `llms.txt`) is unchanged.
+
+### Planned tiers registered (non-failing)
+
+The harness names what it will grow: **C1 (M-04)** upgrades T6/T7's Pool line from
+the engine ledger to the exact `mapped.stats()` `{ live, parked, highWater }` line;
+**C2 (M-03)** adds a `byValue` T5/T6 variant (moves stay pool-flat, only genuine
+inserts pull); **C3 (M-01)** benches output-move cost against T6's index-signal
+floor (a rotate already writes exactly the genuinely-moved set -- the LIS milestone
+is met at the reactive layer).
+
+### Dev dependencies (dev-only; `Map.js` keeps zero runtime deps)
+
+- `@zakkster/lite-gc-profiler ^1.16.0`, `@zakkster/lite-leak ^1.10.0`.
+- The dev `@zakkster/lite-signal` is pinned to `1.6.0-beta-1` (not the
+  `1.6.0-preview.2` peer floor): every published `lite-leak` statically imports
+  `getOwner` from lite-signal, which the `1.6.0-preview.2` build does not export,
+  so the retention witness cannot import against it. `1.6.0-beta-1` is the closest
+  registry build exporting BOTH `getOwner` and `createScope`; the 45-test suite
+  passes byte-for-byte against it, so lite-map's behaviour is unchanged. The
+  **published peer range is untouched** (`^1.6.0-preview.2`) -- this is a dev-tool
+  concern only. Installs may need `--legacy-peer-deps` on the prerelease crossing.
+
+### Verified
+
+- `npm test` -- **45/45**, unchanged.
+- `npm run torture` -- prints exactly `ok`, exit 0, under `--expose-gc`; refuses to
+  run without it (fail closed, exit 1).
+- `npm run torture:controls` -- prints exactly `ok`, exit 0; every armed control
+  exits non-zero for its own reason, no `CONTROL-DEFEATED` on the walk.
+
 ## [1.1.0] -- 2026-07-16
 
 ### Added -- tail fast-paths for `mapArray`
