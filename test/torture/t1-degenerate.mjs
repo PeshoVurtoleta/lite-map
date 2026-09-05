@@ -103,6 +103,65 @@ export function run() {
         validator.assertBase('T1 empty/single');
     }
 
+    // --- stats() degenerate shapes (T1 pins the read surface) -----------------
+    {
+        // never-populated mapArray -> { 0, 0, 0 }; single row -> { 1, 0, 1 };
+        // post-dispose keeps the historical highWater (fact 6).
+        const src = R.signal([], { equals: () => false });
+        const mapped = reg.mapper.mapArray(src, makeMapFn(R, sidBox), { key: keyOf });
+        const stop = R.effect(() => { void mapped(); });
+        const s = mapped.stats();
+        check(s.live === 0 && s.parked === 0 && s.highWater === 0,
+            () => 'T1: never-populated stats() = {' + s.live + ',' + s.parked + ',' + s.highWater +
+                '} (expected 0,0,0)');
+        src.set([{ id: 'solo' }]);
+        check(s.live === 1 && s.parked === 0 && s.highWater === 1,
+            () => 'T1: single-row stats() = {' + s.live + ',' + s.parked + ',' + s.highWater +
+                '} (expected 1,0,1)');
+        stop(); mapped.dispose(); R.dispose(src);
+        check(s.live === 0 && s.parked === 0 && s.highWater === 1,
+            () => 'T1: post-dispose stats() = {' + s.live + ',' + s.parked + ',' + s.highWater +
+                '} (expected 0,0,1 -- highWater historical)');
+    }
+
+    // --- maxPool:0 documented behavior (fact 7): 0 is falsy -> UNSET ----------
+    {
+        // Park 5 rows under maxPool:0. 0 is falsy, so the pool is unbounded and all
+        // 5 stay parked (NOT capped at 0). Pinned as a test so a future fix is a
+        // deliberate breaking change, not a surprise.
+        const rows = [];
+        for (let i = 0; i < 5; i++) rows.push({ id: 'm' + i });
+        const src = R.signal(rows.slice(), { equals: () => false });
+        const mapped = reg.mapper.mapArray(src, makeMapFn(R, sidBox), { key: keyOf, maxPool: 0 });
+        const stop = R.effect(() => { void mapped(); });
+        src.set([]);                                   // pop all 5 to the free-list
+        const s = mapped.stats();
+        check(s.live === 0 && s.parked === 5,
+            () => 'T1: maxPool:0 capped the pool -- parked=' + s.parked +
+                ' (expected 5; 0 is falsy -> unbounded, fact 7)');
+        check(s.highWater === 5, () => 'T1: maxPool:0 highWater=' + s.highWater + ' (expected 5)');
+        stop(); mapped.dispose(); R.dispose(src);
+    }
+
+    // --- indexArray stats(): both primitives are pinned in T1 ----------------
+    {
+        const list = R.signal([10, 20, 30], { equals: () => false });
+        const mapped = reg.mapper.indexArray(list, (item, i) => ({ v: item(), i }));
+        const stop = R.effect(() => { void mapped(); });
+        const s = mapped.stats();
+        check(s.live === 3 && s.parked === 0 && s.highWater === 3,
+            () => 'T1: indexArray stats() = {' + s.live + ',' + s.parked + ',' + s.highWater +
+                '} (expected 3,0,3)');
+        list.set([10, 20]);                            // shrink: park one tail slot
+        check(s.live === 2 && s.parked === 1 && s.highWater === 3,
+            () => 'T1: indexArray after shrink = {' + s.live + ',' + s.parked + ',' + s.highWater +
+                '} (expected 2,1,3)');
+        stop(); mapped.dispose(); R.dispose(list);
+        check(s.live === 0 && s.parked === 0 && s.highWater === 3,
+            () => 'T1: indexArray post-dispose = {' + s.live + ',' + s.parked + ',' + s.highWater +
+                '} (expected 0,0,3)');
+    }
+
     // --- throwing keyOf propagates, state consistent -------------------------
     {
         const poison = { id: 7, bad: false };

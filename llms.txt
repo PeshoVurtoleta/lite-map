@@ -63,6 +63,28 @@ its inserts pull from the pool -- it is a planned opt-in, NOT in 1.0.
   not on value-only churn.
 - mapped.dispose()   stop the driver, dispose every live + parked scope (including
   the item/index signals the scope does not own) and the output signal.
+- mapped.stats() -> { live, parked, highWater }   [1.2] pool counters, BOTH
+  primitives. live = current slot count (= mapped().length); parked = free-list
+  length; highWater = all-time peak of (live + parked). Historical: survives
+  dispose(), which pins { 0, 0, <peak> } (no throw).
+
+## mapped.stats() [1.2]
+
+- Pool observability for a mapped list: a read surface for a monitor, for tuning
+  maxPool by measurement, or for a scoped counter (vs the whole engine ledger).
+- ONE Object.freeze'd object per list, REUSED on every call: allocation-free per
+  read (getters read the current slot/pool lengths + a closure high-water counter).
+  stats() === stats() (reference-stable); Object.keys is [live, parked, highWater].
+- LIVE VIEW: the three fields change between reads WITHOUT another stats() call, so
+  destructure/snapshot if you need a point-in-time copy. Same discipline as the
+  persistent mapped() output array.
+- highWater is the all-time peak of (live + parked) -- exactly the mark the "growth
+  past the previous high-water allocates" non-claim is about, now measurable: a run
+  stays pool-flat while live + parked never exceeds it. A replace-all (n old + n new
+  keys in one set) genuinely coexists both generations, so highWater records the
+  prevN + n transient, not the settled count.
+- maxPool: 0 is falsy and is treated as UNSET (unbounded) today -- pass >= 1 to
+  bound the pool. Documented, not changed.
 
 ## Ownership
 

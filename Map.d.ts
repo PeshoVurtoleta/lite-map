@@ -8,6 +8,17 @@
 /** A reactive read. A lite-signal handle satisfies this (it is callable). */
 export type Accessor<T> = () => T;
 
+/**
+ * Pool observability for a mapped list. `live` is the current slot count, `parked`
+ * the free-list length, and `highWater` the all-time peak of (live + parked) -- the
+ * number the "growth past the high-water mark allocates" non-claim is about.
+ */
+export interface MappedStats {
+    readonly live: number;
+    readonly parked: number;
+    readonly highWater: number;
+}
+
 /** The mapped output accessor. Reading it tracks structural changes to the list. */
 export interface Mapped<O> {
     /**
@@ -23,10 +34,23 @@ export interface Mapped<O> {
      * list down, and you must call this when the list is no longer needed.
      */
     dispose(): void;
+    /**
+     * Pool counters for this list: { live, parked, highWater }. Allocation-free per
+     * read -- ONE frozen object per instance, reused on every call. It is a LIVE
+     * VIEW: the three fields change between reads WITHOUT calling stats() again, so
+     * snapshot them (e.g. destructure) if you need a point-in-time copy. `highWater`
+     * is the all-time peak of (live + parked) and is historical -- it survives
+     * dispose(), which pins { live: 0, parked: 0, highWater: <peak> } (no throw).
+     */
+    stats(): MappedStats;
 }
 
 export interface IndexArrayOptions {
-    /** Cap on parked scopes retained for tail re-growth. Default: unbounded. */
+    /**
+     * Cap on parked scopes retained for tail re-growth. Default: unbounded. Pass
+     * `>= 1` to bound the pool; `0` is falsy and is treated as UNSET (unbounded)
+     * today -- documented, not changed.
+     */
     maxPool?: number;
 }
 
@@ -36,7 +60,11 @@ export interface MapArrayOptions<T> {
      * be unique within the list; duplicate keys are not reconciled efficiently.
      */
     key?: (item: T) => unknown;
-    /** Cap on retired scopes retained for reuse by later inserts. Default: unbounded. */
+    /**
+     * Cap on retired scopes retained for reuse by later inserts. Default: unbounded.
+     * Pass `>= 1` to bound the pool; `0` is falsy and is treated as UNSET
+     * (unbounded) today -- documented, not changed.
+     */
     maxPool?: number;
 }
 

@@ -29,8 +29,9 @@
  *
  * PLANNED EXTENSIONS (registered here, non-failing, so the harness names what it
  * will grow -- see ROADMAP.md sec 4):
- *   - C1 (M-04): mapped.stats() upgrades validate()'s Pool line from the engine
- *     ledger to the exact { live, parked, highWater } line. See makeValidator.
+ *   - C1 (M-04): LANDED. mapped.stats() upgraded validate()'s Pool line from the
+ *     engine ledger to the exact { live, parked, highWater } line, kept alongside
+ *     the ledger as a second witness. See makeValidator + poolLineHolds.
  *   - C2 (M-03): a byValue mapArray variant of T5/T6 -- moves stay pool-flat, only
  *     genuine inserts pull from the pool.
  *   - C3 (M-01): the reorder index-signal floor probed in T6 (rotate-by-1 ==
@@ -280,21 +281,36 @@ export function oracle(arr, keyOf) {
 //   Index:    every live slot i has its idxSig reading i (view.index === i,
 //             observed through the mapFn index accessor -- internals are not
 //             reachable).
-//   Pool:     C0 SCOPE NOTE. mapped exposes only dispose() until C1's stats(), so
-//             the exact { live, parked, highWater } line cannot be read yet. C0
-//             asserts the pool line via the ENGINE ledger: activeNodes stays flat
-//             at the settled high-water across churn (no leak, no double-count)
-//             and returns to base after dispose(). C1 upgrades this to the exact
-//             line once mapped.stats() exists (M-04).
+//   Pool:     C1 exact line (landed, M-04). mapped.stats() reads
+//             { live, parked, highWater }: live === arr.length, parked <= the
+//             EFFECTIVE maxPool, live + parked <= highWater (the peak is a
+//             mid-reconcile prevN+n transient a bounded pool retires below --
+//             never ===), and highWater monotone non-decreasing across calls.
+//             The C0 ENGINE ledger (activeNodes flat at high-water, back to base
+//             after dispose) is KEPT as a second, independent witness.
 
 /**
  * @param {object} R   isolated registry
  * @param {(item:unknown)=>unknown} keyOf
+ * @param {{maxPool?:number}} [opts]  same shape the primitives read; the EFFECTIVE
+ *   cap mirrors Map.js EXACTLY (`(opts && opts.maxPool) || Infinity`), so a
+ *   `maxPool: 0` reads as Infinity here too (fact 7) and validator + code agree by
+ *   construction. Third arg is OPTIONAL: the pre-C1 call sites pass nothing.
  */
-export function makeValidator(R, keyOf) {
+export function makeValidator(R, keyOf, opts) {
     const lastUniqueView = new Map();          // canonKey -> view (last reconcile where unique)
     const base = R.stats().activeNodes;        // ledger base BEFORE any build on this registry
     let highWater = base;                      // all-time peak activeNodes seen through validate()
+    const cap = (opts && opts.maxPool) || Infinity;   // effective maxPool (fact 7)
+    let lastHW = -1;                           // last stats() highWater seen (monotone witness)
+    // lastHW deliberately spans fresh-mapper cycles (T7 rebuilds its mapper per
+    // cycle), so the monotone check couples independent instances. Sound while
+    // each cycle's workload peak is deterministic; a future non-deterministic
+    // T7 shape must construct a fresh validator per cycle instead (qa, C1).
+    // COUPLING: this witness persists across fresh-mapper cycles (T7 builds a new
+    // mapper per cycle but keeps ONE validator), which is sound only because each
+    // cycle's workload peak is deterministic. A future non-deterministic T7 change
+    // could false-fail here -- construct a fresh validator instead of relaxing this.
 
     const keyOfView = (v) => keyOf(v.item);
 
@@ -369,10 +385,25 @@ export function makeValidator(R, keyOf) {
                 if (!present.has(k)) lastUniqueView.delete(k);
             }
 
-            // Pool (ledger high-water tracking). Variable-length tiers grow the
-            // ledger legitimately, so the per-step invariant is monotonic tracking,
-            // not a fixed ceiling; the enforced conservation gate is assertBase()
-            // after dispose (plus the tiers' zero-delta counters).
+            // Pool (C1 exact stats() line -- the primary witness). Fail closed: an
+            // accessor missing the stats surface is a failure, not a skip.
+            check(typeof mapped.stats === 'function',
+                () => label + ': mapped has no stats() surface (expected a function)');
+            const st = mapped.stats();
+            check(poolLineHolds(st, n, cap),
+                () => label + ': Pool line -- live=' + st.live + ' (expected ' + n + ') parked=' +
+                    st.parked + ' cap=' + cap + ' highWater=' + st.highWater +
+                    ' (want live===n, parked<=cap, live+parked<=highWater)');
+            check(highWaterMonotone(lastHW, st.highWater),
+                () => label + ': highWater regressed from ' + lastHW + ' to ' + st.highWater +
+                    ' (must be monotonic non-decreasing)');
+            lastHW = st.highWater;
+
+            // Pool (engine ledger high-water tracking) -- the C0 witness, KEPT as a
+            // second, independent signal. Variable-length tiers grow the ledger
+            // legitimately, so the per-step invariant is monotonic tracking, not a
+            // fixed ceiling; the enforced conservation gate is assertBase() after
+            // dispose (plus the tiers' zero-delta counters).
             const now = R.stats().activeNodes;
             if (now > highWater) highWater = now;
         },
@@ -390,6 +421,37 @@ export function makeValidator(R, keyOf) {
  * @param {(item:unknown)=>unknown} keyOf
  * @returns {boolean}
  */
+/**
+ * The pure Pool-line predicate behind validate()'s C1 stats() check, exposed so the
+ * validator and the T9 controls share ONE source of truth and cannot drift.
+ *   - st.live === expectLive          (the reconciled slot count == the row count)
+ *   - st.parked <= cap                 (parked bounded by the EFFECTIVE maxPool)
+ *   - st.live + st.parked <= highWater (NEVER ===: the peak is a mid-reconcile
+ *                                       prevN+n transient a bounded pool retires
+ *                                       below -- exact conservation only in scripted
+ *                                       tests with a hand-computed ledger)
+ * @param {{live:number, parked:number, highWater:number}} st
+ * @param {number} expectLive
+ * @param {number} cap   effective maxPool (Infinity when absent or 0, per fact 7)
+ * @returns {boolean}
+ */
+export function poolLineHolds(st, expectLive, cap) {
+    return st.live === expectLive &&
+        st.parked <= cap &&
+        st.live + st.parked <= st.highWater;
+}
+
+/**
+ * highWater is monotonic non-decreasing across reads: a shrink-then-regrow never
+ * lowers it. `prevHW` of -1 (the validator's initial) admits any first reading.
+ * @param {number} prevHW
+ * @param {number} hw
+ * @returns {boolean}
+ */
+export function highWaterMonotone(prevHW, hw) {
+    return hw >= prevHW;
+}
+
 export function identityHolds(prevUnique, out, arr, keyOf) {
     const mult = new Map();
     for (let i = 0; i < arr.length; i++) {

@@ -22,7 +22,7 @@
  *
  * Reserved / planned (named in test/torture/harness.mjs, non-failing):
  *     T2  (unused)  T3  (unused)  T4  (unused)  T8  (unused)
- *     C1 upgrades T6/T7's Pool line to mapped.stats() (M-04);
+ *     C1 upgraded T6/T7's Pool line to mapped.stats() (M-04, landed);
  *     C2 adds a byValue T5/T6 variant (M-03);
  *     C3 benches output-move cost against T6's index-signal floor (M-01).
  *

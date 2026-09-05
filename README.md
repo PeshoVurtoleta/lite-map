@@ -189,7 +189,12 @@ Measured against the engine's pool counters (`poolGrowths` / `totalAllocations`)
 **Not claimed:**
 
 - **Growth past the previous high-water mark** pulls scopes from the pool -- there is
-  no representing N+1 distinct items with N scopes. Warm to your peak.
+  no representing N+1 distinct items with N scopes. Warm to your peak. Since 1.2 this
+  is **measurable**: `mapped.stats().highWater` is exactly that mark, so a run stays
+  pool-flat for as long as `live + parked` never exceeds it. `stats()` itself is
+  allocation-free -- one frozen live-view object per list, its getters reading the
+  current slot/pool lengths and a closure counter, so a monitor can poll it in a hot
+  loop without adding a byte of garbage.
 - The keyed `byKey` Map mutates (`set`/`delete`) on **actual key changes** -- a JS-heap
   allocation the pool counters do not see. A reorder touches no key, so it does not
   churn the Map; inserts/removes touch one key each.
@@ -208,10 +213,46 @@ teardown -- prefer effects/computeds (which are cascaded), or dispose it yoursel
 indexArray(list, (item: () => T, index: number) => O, opts?: { maxPool?: number }): Mapped<O>
 mapArray(list, (item: () => T, index: () => number) => O, opts?: { key?: (item: T) => unknown; maxPool?: number }): Mapped<O>
 createMapper(registry): { mapArray, indexArray }    // bind to a non-default registry
+
+// Mapped<O>:
+mapped(): O[]                 // outputs in source order (one persistent array)
+mapped.dispose(): void        // stop the driver, dispose every live + parked scope
+mapped.stats(): MappedStats   // { live, parked, highWater } -- a reused frozen live view
 ```
 
 `list` is an accessor (`() => T[]`); a lite-signal handle is callable and satisfies it.
-`Mapped<O>` is `(() => O[]) & { dispose(): void }`.
+`Mapped<O>` is `(() => O[]) & { dispose(): void; stats(): MappedStats }`.
+
+---
+
+## Pool observability (1.2)
+
+`mapped.stats()` reports the pool for a list -- for a monitor, for tuning `maxPool`
+by measurement, or for a bench that reads a scoped counter instead of the whole
+engine ledger. It works on **both** primitives.
+
+```js
+const rows = mapArray(todos, rowFn, { key: (t) => t.id });
+const s = rows.stats();
+s.live;        // slots currently in the list
+s.parked;      // scopes on the free-list, ready to be reused
+s.highWater;   // all-time peak of (live + parked) on this list
+```
+
+| Field | Meaning |
+| --- | --- |
+| `live` | current slot count (`= mapped().length`) |
+| `parked` | free-list length (retired scopes kept for reuse) |
+| `highWater` | all-time peak of `live + parked`; historical, survives `dispose()` |
+
+`stats()` returns **one frozen object per list, reused on every call** -- zero
+allocation per read. It is a **LIVE VIEW**: the three fields change between reads
+*without* calling `stats()` again, so destructure (`const { live } = rows.stats()`)
+if you need a point-in-time snapshot. After `dispose()` it pins
+`{ live: 0, parked: 0, highWater: <peak> }` and never throws.
+
+> `maxPool: 0` is falsy and is treated as **unset** (unbounded) today -- pass `>= 1`
+> to bound the pool. Documented, not changed.
 
 ---
 

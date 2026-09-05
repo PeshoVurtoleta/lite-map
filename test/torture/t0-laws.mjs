@@ -103,9 +103,33 @@ export function run() {
         () => 'T0: idempotence grew the pool -- poolGrowths delta ' +
             (b1.poolGrowths - b0.poolGrowths) + ' (expected 0)');
 
-    // --- law: dispose leaves zero retained -----------------------------------
+    // --- law: stats() is a reused, frozen, live view -------------------------
+    const st = mapped.stats();
+    check(st === mapped.stats(), () => 'T0: stats() is not reference-stable across reads');
+    check(Object.isFrozen(st), () => 'T0: stats() object is not frozen');
+    check(typeof st.live === 'number' && typeof st.parked === 'number' && typeof st.highWater === 'number',
+        () => 'T0: stats() fields are not all numbers');
+    check(Object.keys(st).join(',') === 'live,parked,highWater',
+        () => 'T0: stats() keys are [' + Object.keys(st).join(',') + '] (expected live,parked,highWater)');
+
+    // Live-view freshness: the SAME object reports the new live after a mutation,
+    // with NO second stats() call.
+    const liveBefore = st.live;
+    src.set(stable.slice(0, stable.length - 1));     // pop the tail row
+    check(st.live === liveBefore - 1,
+        () => 'T0: stats() is not a live view -- live=' + st.live + ' after a pop (expected ' +
+            (liveBefore - 1) + ')');
+    src.set(stable);                                 // restore
+    const hwBefore = st.highWater;
+
+    // --- law: dispose leaves zero retained + fact-6 post-dispose pin ----------
     stop();
     mapped.dispose();
     R.dispose(src);
     validator.assertBase('T0');
+    check(mapped.stats() === st, () => 'T0: stats() reference changed after dispose');
+    check(st.live === 0 && st.parked === 0,
+        () => 'T0: post-dispose stats() not zeroed -- live=' + st.live + ' parked=' + st.parked);
+    check(st.highWater === hwBefore,
+        () => 'T0: post-dispose highWater=' + st.highWater + ' (expected historical ' + hwBefore + ')');
 }

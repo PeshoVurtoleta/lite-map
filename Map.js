@@ -1,5 +1,5 @@
 /**
- * @zakkster/lite-map v1.1.1 -- zero-GC keyed list reconciliation for
+ * @zakkster/lite-map v1.2.0 -- zero-GC keyed list reconciliation for
  * @zakkster/lite-signal.
  * -----------------------------------------------------------------------------
  * Map a reactive array to per-item reactive scopes so that list mutation MOVES
@@ -34,6 +34,15 @@
  * the reconcile driver are detached from the calling scope, so an enclosing
  * effect re-running never cascade-disposes the list. The caller owns teardown:
  * the returned accessor carries a `.dispose()`.
+ *
+ * -- OBSERVABILITY --
+ * The returned accessor also carries a `.stats()` -> { live, parked, highWater }:
+ * a reused, Object.freeze'd LIVE VIEW (its getters read the current slot/pool
+ * lengths and a per-instance high-water counter, so fields change between reads
+ * WITHOUT another stats() call -- snapshot the three fields if you need a
+ * point-in-time copy). Allocation-free per read: one frozen object per instance,
+ * built at creation. highWater is the all-time peak of (live + parked) and is
+ * historical -- it survives dispose(), which pins { 0, 0, <peak> }.
  *
  * -- ZERO-GC, AND THE HONEST NON-CLAIMS --
  * PASS (no pool pull, no growth, after warm-up):
@@ -103,6 +112,7 @@ export function createMapper(reg) {
         const o = [];           // the output array (persistent, mutated in place)
         const out = signal(o, { equals: NEVER_EQUAL });
         let len = 0;
+        let total = 0, highWater = 0;   // live + parked population, and its all-time peak
 
         const makeSlot = (item, index) => {
             let slot;
@@ -111,13 +121,16 @@ export function createMapper(reg) {
                 const view = mapFn(() => itemSig(), index);
                 slot = { itemSig, view, dispose: disposeScope, index, item };
             });
+            // AFTER createScope returns: a throwing mapFn never enters scopes/pool
+            // and so can never be decremented -- do not count it (fail closed).
+            total++; if (total > highWater) highWater = total;
             return slot;
         };
 
         // Permanent teardown of a slot: cascade its scope (effects/computeds), then
         // dispose the itemSig the scope did NOT adopt (the engine never owner-adopts
         // signals). Parking a slot does NOT call this -- a parked slot stays live.
-        const disposeSlot = (s) => { s.dispose(); dispose(s.itemSig); };
+        const disposeSlot = (s) => { s.dispose(); dispose(s.itemSig); total--; };
 
         // Reuse a parked slot only when its baked index matches the target (so the
         // plain-number `index` mapFn received stays correct). Descending park +
@@ -162,6 +175,15 @@ export function createMapper(reg) {
         let stopDriver;
         createRoot(() => { stopDriver = effect(() => { const arr = list(); untrack(() => reconcile(arr)); }); });
 
+        // One frozen LIVE VIEW per instance: getters read the current lengths and
+        // the closure highWater at call time (never a captured snapshot), so the
+        // object is reference-stable and allocation-free per read.
+        const statsView = Object.freeze({
+            get live() { return scopes.length; },
+            get parked() { return pool.length; },
+            get highWater() { return highWater; },
+        });
+
         const read = () => out();
         read.dispose = () => {
             stopDriver();
@@ -170,6 +192,7 @@ export function createMapper(reg) {
             dispose(out);
             scopes.length = 0; pool.length = 0; o.length = 0; len = 0;
         };
+        read.stats = () => statsView;
         return read;
     }
 
@@ -190,6 +213,7 @@ export function createMapper(reg) {
         const o = [];               // output array (persistent, mutated in place)
         const out = signal(o, { equals: NEVER_EQUAL });
         let epoch = 0;
+        let total = 0, highWater = 0;   // live + parked population, and its all-time peak
 
         const makeSlot = (item, index, key) => {
             let slot;
@@ -199,12 +223,15 @@ export function createMapper(reg) {
                 const view = mapFn(() => itemSig(), () => idxSig());
                 slot = { itemSig, idxSig, view, dispose: disposeScope, key, index, item, seen: epoch };
             });
+            // AFTER createScope returns: a throwing mapFn never enters slots/pool
+            // and so can never be decremented -- do not count it (fail closed).
+            total++; if (total > highWater) highWater = total;
             return slot;
         };
 
         // Permanent teardown: cascade the scope, then dispose the itemSig + idxSig
         // the scope did not adopt. Parking does NOT call this.
-        const disposeSlot = (s) => { s.dispose(); dispose(s.itemSig); dispose(s.idxSig); };
+        const disposeSlot = (s) => { s.dispose(); dispose(s.itemSig); dispose(s.idxSig); total--; };
 
         // A genuinely-new key: reuse a retired scope (rebind its signals -- zero-GC)
         // or build one.
@@ -340,6 +367,16 @@ export function createMapper(reg) {
         let stopDriver;
         createRoot(() => { stopDriver = effect(() => { const arr = list(); untrack(() => reconcile(arr)); }); });
 
+        // One frozen LIVE VIEW per instance. `slots` is a let, swapped with
+        // `scratch` on every general diff and reassigned to [] on dispose, so the
+        // getter must name the VARIABLE directly (never a captured array ref) --
+        // a captured ref would report the stale scratch length forever.
+        const statsView = Object.freeze({
+            get live() { return slots.length; },
+            get parked() { return pool.length; },
+            get highWater() { return highWater; },
+        });
+
         const read = () => out();
         read.dispose = () => {
             stopDriver();
@@ -349,6 +386,7 @@ export function createMapper(reg) {
             dispose(out);
             slots = []; scratch = []; pool.length = 0; o.length = 0;
         };
+        read.stats = () => statsView;
         return read;
     }
 

@@ -1,7 +1,7 @@
 /**
  * T6 -- the zero-alloc gate. THE tier for this package.
  *
- * Two phases, STRICTLY SEQUENTIAL (lite-gc-profiler is one-measurement-at-a-time):
+ * Three phases, STRICTLY SEQUENTIAL (lite-gc-profiler is one-measurement-at-a-time):
  *
  *   (1) the alloc window. A mixed append/pop/reorder/value-churn/warm
  *       insert-remove hot body over a mapper bound to an ISOLATED registry
@@ -15,6 +15,16 @@
  *       writes EXACTLY `genuinely-moved` idxSig.set calls (== 1000, M-01's floor,
  *       counted through the mapFn index effect); an adjacent mid-list swap writes
  *       exactly 2; and mapped() hands back the SAME array reference across reads.
+ *
+ *   (3) stats() -- allocation-free reads + hand-computed exactness (C1, M-04).
+ *       3a: 10000 mapped.stats() reads inside a runOpsGate window over a warm
+ *       200-row list -- poolGrowths/totalAllocations deltas 0, verdict PASS, and a
+ *       module sink proves the window is not dead-code-eliminated. 3b (OUTSIDE any
+ *       window): scripted churn with hand-computed counts -- a maxPool:2 overflow
+ *       proves disposeSlot's total-- (regrow leaves highWater flat, not doubled), a
+ *       replace-all proves the fact-3 prevN+n transient (50 -> 50 new keys leaves
+ *       highWater 100), and shrink-then-regrow never lowers highWater; both
+ *       primitives are pinned. Phases 1 and 2 are NOT edited (additions only).
  *
  * FAIL-CLOSED: the alloc window refuses to open on a registry that is not
  * verified "throw" mode (the M-02 trap made executable) -- a "grow" registry
@@ -46,6 +56,10 @@ const FLOOR_N = 1000;      // rotate-by-1 floor probe size
 
 /** Retained sink for the t6 control -- survives GC so arrayBuffers grows. */
 const leak = [];
+
+/** Module-level fold target for phase 3a: the stats() read window folds its three
+ *  fields here so a dead-code-eliminated window cannot pass vacuously. */
+const sink = { n: 0 };
 
 export function run() {
     let gcMetrics = { major: 0, minor: 0, maxMs: 0 };
@@ -190,6 +204,140 @@ export function run() {
         check(mapped() === mapped(), () => 'T6: mapped() reference not stable after reorder');
 
         stop(); mapped.dispose(); R.dispose(src);
+    }
+
+    // ===== phase 3: stats() -- alloc-free reads + exactness (C1, M-04) =======
+    // 3a is a measured window; 3b is scripted, OUTSIDE any window. Strictly after
+    // phases 1/2 (one-measurement-at-a-time).
+    {
+        // --- 3a: the gate -- 10000 stats() reads allocate nothing ------------
+        const reg = makeRegistry({ maxNodes: 1 << 14, maxLinks: 1 << 16, mode: 'throw' });
+        const R = reg.R;
+        const keyOf = (r) => r.id;
+        const sidBox = { n: 0 };
+        const mapFn = makeMapFn(R, sidBox);
+
+        check(isThrowRegistry(reg),
+            () => 'T6: stats window opened on a non-throw registry (mode=' + reg.mode + ')');
+
+        const rows = new Array(200);
+        for (let i = 0; i < 200; i++) rows[i] = { id: i, v: 0 };
+        const src = R.signal(rows.slice(), { equals: () => false });
+        const mapped = reg.mapper.mapArray(src, mapFn, { key: keyOf });
+        const stop = R.effect(() => { void mapped(); });
+
+        // Hot body: read the reused frozen live view, fold its three fields into a
+        // module sink so a dead-code-eliminated window cannot pass vacuously. The
+        // driver allocates nothing: stats() returns the pre-frozen object and its
+        // getters read `.length` / a closure `let`.
+        const readStats = () => {
+            const st = mapped.stats();
+            sink.n = (sink.n + st.live + st.parked + st.highWater) | 0;
+        };
+        for (let i = 0; i < WARMUP; i++) readStats();   // manual warm before the window
+
+        const b0 = R.stats();
+        const { report, summary } = runOpsGate(readStats, { ops: 10000, warmup: 0 });
+        const b1 = R.stats();
+
+        if (report.verdict !== 'pass') {
+            const g = summary.gc;
+            die('T6 stats gate verdict=' + report.verdict + ' (expected "pass") -- source=' + summary.source +
+                ' major=' + g.major + ' maxMs=' + g.maxMs.toFixed(3) +
+                ' abGrowth=' + summary.arrayBuffers.growthBytes);
+        }
+        const dGrow = b1.poolGrowths - b0.poolGrowths;
+        const dAlloc = b1.totalAllocations - b0.totalAllocations;
+        check(dGrow === 0, () => 'T6: stats() reads grew the pool -- poolGrowths delta ' + dGrow + ' (expected 0)');
+        check(dAlloc === 0, () => 'T6: stats() reads allocated nodes -- totalAllocations delta ' + dAlloc + ' (expected 0)');
+        check(sink.n !== 0,
+            () => 'T6: stats() window folded to sink.n===0 -- the reads were dead-code-eliminated, not measured');
+
+        stop(); mapped.dispose(); R.dispose(src);
+    }
+
+    {
+        // --- 3b: hand-computed exactness (OUTSIDE any window) ----------------
+        const reg = makeRegistry({ maxNodes: 1 << 14, maxLinks: 1 << 16, mode: 'throw' });
+        const R = reg.R;
+        const keyOf = (r) => r.id;
+        const sidBox = { n: 0 };
+        const mk = (n, tag) => { const a = new Array(n); for (let i = 0; i < n; i++) a[i] = { id: tag + i }; return a; };
+
+        // (i) mapArray maxPool:2 overflow proves disposeSlot's total-- .
+        {
+            const src = R.signal([], { equals: () => false });
+            const mapped = reg.mapper.mapArray(src, makeMapFn(R, sidBox), { key: keyOf, maxPool: 2 });
+            const stop = R.effect(() => { void mapped(); });
+
+            src.set(mk(10, 'g'));                          // build 10 -> highWater 10
+            let s = mapped.stats();
+            check(s.live === 10 && s.parked === 0 && s.highWater === 10,
+                () => 'T6.3b(i): grow-10 stats={' + s.live + ',' + s.parked + ',' + s.highWater + '} (expected 10,0,10)');
+            src.set([]);                                  // drop all: cap 2 parked, 8 disposeSlot'd
+            s = mapped.stats();
+            check(s.live === 0 && s.parked === 2 && s.highWater === 10,
+                () => 'T6.3b(i): drop-0 stats={' + s.live + ',' + s.parked + ',' + s.highWater +
+                    '} (expected 0,2,10 -- 8 disposed via total--)');
+            src.set(mk(10, 'h'));                          // regrow all-new: 2 reused + 8 built
+            s = mapped.stats();
+            check(s.highWater === 10,
+                () => 'T6.3b(i): regrow highWater=' + s.highWater +
+                    ' (expected 10 -- total-- kept the peak flat; 18 would mean disposeSlot never decremented)');
+            stop(); mapped.dispose(); R.dispose(src);
+        }
+
+        // (ii)/(iii) mapArray replace-all transient + shrink-then-regrow floor.
+        {
+            const A = mk(50, 'a');
+            const B = mk(50, 'b');
+            const src = R.signal([], { equals: () => false });
+            const mapped = reg.mapper.mapArray(src, makeMapFn(R, sidBox), { key: keyOf });
+            const stop = R.effect(() => { void mapped(); });
+
+            src.set(A.slice());                           // 50 rows -> highWater 50
+            let s = mapped.stats();
+            check(s.live === 50 && s.highWater === 50,
+                () => 'T6.3b(ii): 50-row stats live=' + s.live + ' highWater=' + s.highWater + ' (expected 50,50)');
+            src.set(B.slice());                           // 50 ALL-NEW keys in ONE set: prevN+n peak
+            s = mapped.stats();
+            check(s.live === 50 && s.parked === 50 && s.highWater === 100,
+                () => 'T6.3b(ii): replace-all stats={' + s.live + ',' + s.parked + ',' + s.highWater +
+                    '} (expected 50,50,100 -- the transient prevN+n high-water)');
+            src.set(B.slice(0, 5));                        // shrink to 5
+            s = mapped.stats();
+            check(s.highWater === 100,
+                () => 'T6.3b(iii): shrink lowered highWater to ' + s.highWater + ' (expected 100)');
+            src.set(B.slice(0, 20));                       // regrow to 20 from the warm pool
+            s = mapped.stats();
+            check(s.highWater === 100,
+                () => 'T6.3b(iii): regrow lowered highWater to ' + s.highWater + ' (expected 100)');
+            stop(); mapped.dispose(); R.dispose(src);
+        }
+
+        // (iv) the same overflow pair once on indexArray (grow/shrink only).
+        {
+            const ten = []; for (let i = 0; i < 10; i++) ten.push(i);
+            const list = R.signal([], { equals: () => false });
+            const mapped = reg.mapper.indexArray(list, (item, i) => ({ v: item(), i }), { maxPool: 2 });
+            const stop = R.effect(() => { void mapped(); });
+
+            list.set(ten.slice());                        // grow to 10 -> highWater 10
+            let s = mapped.stats();
+            check(s.live === 10 && s.parked === 0 && s.highWater === 10,
+                () => 'T6.3b(iv): indexArray grow-10 stats={' + s.live + ',' + s.parked + ',' + s.highWater +
+                    '} (expected 10,0,10)');
+            list.set([]);                                 // shrink to 0: cap 2 parked, 8 disposeSlot'd
+            s = mapped.stats();
+            check(s.live === 0 && s.parked === 2 && s.highWater === 10,
+                () => 'T6.3b(iv): indexArray shrink-0 stats={' + s.live + ',' + s.parked + ',' + s.highWater +
+                    '} (expected 0,2,10)');
+            list.set(ten.slice());                        // regrow to 10
+            s = mapped.stats();
+            check(s.highWater === 10,
+                () => 'T6.3b(iv): indexArray regrow highWater=' + s.highWater + ' (expected 10 -- total-- proven)');
+            stop(); mapped.dispose(); R.dispose(list);
+        }
     }
 
     return { gc: gcMetrics };

@@ -46,7 +46,7 @@ export async function run() {
     const R = reg.R;
     const keyOf = (it) => it.id;
     const sidBox = { n: 0 };
-    const validator = makeValidator(R, keyOf);
+    const validator = makeValidator(R, keyOf, { maxPool: MAXPOOL });
 
     const leaks = [];
     const warns = [];
@@ -78,6 +78,20 @@ export async function run() {
         validator.resetIdentity();   // fresh mapper each cycle: no cross-cycle identity
         validator.validate(mapped, items, 'T7 cycle ' + c);
 
+        // Per-cycle stats() conservation (C1): the reused frozen live view reports
+        // the settled population. Integer comparisons on ONE pre-frozen object --
+        // no per-cycle allocation added to the 4096-iteration loop. Captured now so
+        // the post-dispose pin can prove highWater is historical (survives dispose).
+        const st = mapped.stats();
+        check(st.live === ROWS,
+            () => 'T7 cycle ' + c + ': stats live=' + st.live + ' (expected ' + ROWS + ')');
+        check(st.parked <= MAXPOOL,
+            () => 'T7 cycle ' + c + ': stats parked=' + st.parked + ' > maxPool ' + MAXPOOL);
+        check(st.live + st.parked <= st.highWater,
+            () => 'T7 cycle ' + c + ': live+parked ' + (st.live + st.parked) +
+                ' > highWater ' + st.highWater);
+        const hwBefore = st.highWater;
+
         // The retention witness: track this cycle's last item. Neither cleanup nor
         // tag closes over it. Under the control, retain it externally so the FR
         // cannot fire and size() cannot drain.
@@ -88,6 +102,14 @@ export async function run() {
         stop();
         mapped.dispose();
         R.dispose(src);
+        // Post-dispose stats pin (fact 6): live/parked zeroed, highWater historical
+        // (unchanged from the pre-dispose read). Same reused object, no throw.
+        check(st.live === 0 && st.parked === 0,
+            () => 'T7 cycle ' + c + ': post-dispose stats not zeroed -- live=' + st.live +
+                ' parked=' + st.parked);
+        check(st.highWater === hwBefore,
+            () => 'T7 cycle ' + c + ': post-dispose highWater=' + st.highWater +
+                ' (expected historical ' + hwBefore + ')');
         // Ledger conservation: every node the mappers took is back in the pool,
         // and the pool did not drift up (parked bounded by maxPool).
         validator.assertBase('T7 cycle ' + c);

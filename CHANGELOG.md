@@ -4,6 +4,48 @@ All notable changes to `@zakkster/lite-map` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] -- 2026-09-05
+
+Pool observability (M-04), purely additive: a mapped list gains a read surface.
+No reconcile behaviour change of any kind -- the four reconcile branches, acquire's
+reuse path and retire's park path get zero new bytes; every counter line lands on
+the build path (`makeSlot`) and the teardown path (`disposeSlot`).
+
+### Added -- `mapped.stats()` on both primitives
+
+- `mapped.stats() -> { live, parked, highWater }` on **both** `mapArray` and
+  `indexArray`. `live` = current slot count (`= mapped().length`); `parked` =
+  free-list length; `highWater` = the all-time peak of `live + parked`. This is the
+  scoped counter the roadmap's LIS bench needed (previously
+  `Object.getOwnPropertyNames(mapped)` was `["dispose"]` only).
+- **Allocation-free per read.** `stats()` returns ONE `Object.freeze`'d object per
+  list, reused on every call; its getters read the current slot/pool lengths and a
+  per-instance high-water counter. `stats() === stats()` (reference-stable),
+  `Object.isFrozen(stats())` is true, `Object.keys` is `[live, parked, highWater]`.
+  Gated: 10,000 `stats()` reads inside the T6 window show `poolGrowths` /
+  `totalAllocations` deltas both **0**, `maxMajor 0`, `maxArrayBuffersGrowth 0`.
+- **LIVE VIEW semantics.** The three fields change between reads *without* another
+  `stats()` call -- destructure/snapshot for a point-in-time copy. Same discipline as
+  the persistent `mapped()` output array.
+- **`highWater` is historical.** It is the peak of `live + parked`, survives
+  `dispose()` (which pins `{ 0, 0, <peak> }`, no throw), and is exactly the mark the
+  "growth past the previous high-water allocates" non-claim is about -- now
+  measurable. A replace-all (n old + n new keys in one `set`) genuinely coexists both
+  generations, so `highWater` records the `prevN + n` transient (50 rows -> 50 all-new
+  keys leaves `highWater` at 100), not the settled count.
+
+### Changed -- torture harness (no new tier files)
+
+- The validator's Pool line is upgraded from the C0 engine-ledger witness to the
+  exact `stats()` line: `live === arr.length`, `parked <= effective maxPool`,
+  `live + parked <= highWater`, and `highWater` monotone non-decreasing across
+  `validate()` calls. The engine-ledger conservation check is **kept** as a second,
+  independent witness. Deferred reviewer nit 13 (an explicit numeric `parked <= cap`)
+  lands here. `maxPool: 0` remains falsy -> unset (unbounded); documented, not changed.
+- Tiers extended in place (T0 stats laws, T1 degenerate + `maxPool:0` pin, T6 phase 3
+  alloc-free reads + hand-computed exactness, T7 per-cycle conservation, T9 two new
+  in-process controls), and a new `test/stats_test.mjs` (node:test).
+
 ## [1.1.1] -- 2026-09-05
 
 Hygiene release: no behaviour change, no new API. The only `Map.js` change is
