@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-map",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Zero-GC keyed list reconciliation for @zakkster/lite-signal: mapArray and indexArray that MOVE and REBIND per-item reactive scopes instead of rebuilding them, reusing retired scopes from a free-list so steady-state list churn never grows the pool.",
   "type": "module",
   "main": "./Map.js",

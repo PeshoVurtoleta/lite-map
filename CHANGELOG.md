@@ -4,10 +4,12 @@ All notable changes to `@zakkster/lite-map` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [1.4.0] -- unreleased
+## [1.4.0] -- 2026-09-05
 
-DOCS-ONLY: Map.js and Map.d.ts are byte-identical to 1.3.0 (no API, no
-behavior change). Session facts recorded here per the C3 plan:
+NO RUNTIME CHANGE: Map.js differs from 1.3.0 only in the version header line,
+Map.d.ts is byte-identical (no API, no behavior change); the release carries
+docs, the LIS decision record, and the peer-floor correction below. Session
+facts recorded per the C3 plan:
 - M-06 STAYS OPEN: as of 2026-09-05 the registry has no stable lite-signal
   >= 1.6.0 (latest 1.5.0; beta dist-tag -> 1.6.0-beta-1, the dev pin;
   highest 1.6.x prerelease 1.6.0-preview.2), so the stable "^1.6.0" floor
@@ -41,9 +43,6 @@ behavior change). Session facts recorded here per the C3 plan:
 - README "Not in 1.0" and the llms.txt gotcha: the LIS bullet no longer
   promises a planned pass; it records the measured numbers and points at
   `decisions/0002-lis-ordering.md`.
-
-### Changed -- peer floor corrected to the build the suite actually runs against
-
 - **`peerDependencies`: `@zakkster/lite-signal` `^1.6.0-preview.2` ->
   `^1.6.0-beta-1`** (amends M-06's interim pin; the planned `^1.6.0` narrowing
   once a stable ships is unchanged). `1.6.0-beta-1` is the registry's current
@@ -70,7 +69,8 @@ behavior change). Session facts recorded here per the C3 plan:
   floor and stay excluded.
 - Docs state the same floor: `llms.txt` (peer line + the `createMapper` entry),
   README's peer blockquote, and the harness note in
-  `test/harness_map_test.mjs`. `Map.js` is byte-identical -- no runtime change.
+  `test/harness_map_test.mjs`. `Map.js` carries no runtime change (it differs
+  from 1.3.0 only in the version header line).
 
 ## [1.3.0] -- 2026-09-05
 
