@@ -21,7 +21,7 @@
 
 import {
     SEED, makePrng, check, breaking,
-    makeRegistry, makeMapFn, makeValidator, isThrowRegistry,
+    makeRegistry, makeMapFn, makeByValueMapFn, makeValidator, isThrowRegistry,
 } from './harness.mjs';
 
 const SCALE = Math.max(1, Number(process.env.TORTURE_SCALE) || 1);
@@ -94,4 +94,73 @@ export function run() {
 
     stop(); mapped.dispose(); R.dispose(src);
     validator.assertBase('T5');
+
+    // ===== byValue differential lane ([1.3]) =================================
+    // Same oracle (validate()), keyOf = reference identity: the item IS the key.
+    // sid identity holds -- a reference present once maps to the SAME view across
+    // every reconcile; duplicate objects are contained; -0 <-> 0 is not a change.
+    // The invariant vs the accessor lane: parked === 0 forever (no free-list), so
+    // the pool RECYCLES within its pre-grown capacity (poolGrowths delta 0) while
+    // genuine inserts allocate (totalAllocations is expected to move, not asserted).
+    {
+        const bvKeyOf = (it) => it;
+        const bvValidator = makeValidator(R, bvKeyOf, { maxPool: Infinity });
+        const bvSid = { n: 0 };
+        const rand2 = makePrng(SEED ^ 0xB0FFE);
+        const ri2 = (m) => rand2() % m;
+        let uid = 0;
+        const mkObj = () => ({ uid: uid++ });
+
+        // Scripted -0 vs 0 seam: SameValueZero collides -> not an item change.
+        {
+            const zsrc = R.signal([-0], { equals: () => false });
+            const zmapped = reg.mapper.mapArray(zsrc, makeByValueMapFn(R, { n: 0 }), { byValue: true });
+            const zstop = R.effect(() => { void zmapped(); });
+            const z0 = zmapped()[0];
+            zsrc.set([0]);
+            check(zmapped()[0] === z0,
+                () => 'T5: byValue -0 -> 0 rebuilt the slot (SameValueZero must not be an item change)');
+            check(Object.is(zmapped()[0].item, -0),
+                () => 'T5: byValue -0/0 view lost the SameValueZero representative');
+            check(zmapped.stats().parked === 0, () => 'T5: byValue -0/0 parked ' + zmapped.stats().parked);
+            zstop(); zmapped.dispose(); R.dispose(zsrc);
+        }
+
+        let bvModel = [];
+        for (let i = 0; i < 6; i++) bvModel.push(mkObj());
+        const bvSrc = R.signal(bvModel.slice(), { equals: () => false });
+        const bvMapped = reg.mapper.mapArray(bvSrc, makeByValueMapFn(R, bvSid), { byValue: true });
+        const bvStop = R.effect(() => { void bvMapped(); });
+        bvValidator.validate(bvMapped, bvModel, 'T5 byValue initial');
+
+        const BV_ITERS = 1500 * SCALE;
+        const BV_MAX = 40;
+        const bv0 = R.stats();
+        for (let i = 0; i < BV_ITERS; i++) {
+            const op = ri2(9);
+            const n = bvModel.length;
+            if (op === 0 && n < BV_MAX) bvModel.push(mkObj());                    // append
+            else if (op === 1 && n) bvModel.pop();                               // pop
+            else if (op === 2 && n < BV_MAX) bvModel.unshift(mkObj());           // prepend
+            else if (op === 3 && n < BV_MAX) bvModel.splice(ri2(n + 1), 0, mkObj());  // middle insert
+            else if (op === 4 && n) bvModel.splice(ri2(n), 1);                   // middle remove
+            else if (op === 5 && n > 1) { const a = ri2(n), b = ri2(n); const t = bvModel[a]; bvModel[a] = bvModel[b]; bvModel[b] = t; }  // swap
+            else if (op === 6 && n > 1) bvModel = bvModel.slice().reverse();     // reverse
+            else if (op === 7 && n > 0 && n < BV_MAX) bvModel.splice(1, 0, bvModel[0]);  // duplicate object (same ref)
+            else if (n > 1) { const a = ri2(n), b = ri2(n); const [lo, hi] = a < b ? [a, b] : [b, a]; bvModel = bvModel.slice(0, lo).concat(bvModel.slice(lo, hi + 1).reverse(), bvModel.slice(hi + 1)); }
+
+            bvSrc.set(bvModel.slice());
+            bvValidator.validate(bvMapped, bvModel, 'T5 byValue step ' + i);
+            check(bvMapped.stats().parked === 0,
+                () => 'T5 byValue step ' + i + ': parked=' + bvMapped.stats().parked + ' (invariant: 0, no free-list)');
+        }
+        const bv1 = R.stats();
+        const bvGrow = bv1.poolGrowths - bv0.poolGrowths;
+        check(bvGrow === 0,
+            () => 'T5: byValue poolGrowths delta ' + bvGrow + ' (expected 0) -- churn recycled within the ' +
+                'pre-grown pool; a "grow" registry would have hidden a genuine growth');
+
+        bvStop(); bvMapped.dispose(); R.dispose(bvSrc);
+        bvValidator.assertBase('T5 byValue');
+    }
 }

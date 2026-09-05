@@ -16,9 +16,12 @@ detached per-item-subtree disposal primitive). ESM only. DOM-free. MIT.
 ## The fork this ships
 
 By-accessor: the CHANGING dimension is always an accessor. That is what lets a
-retired scope be reused for a new item by setting its signals (no rebuild). A
-by-value mapArray (item as a plain value) cannot reuse a scope for a new item, so
-its inserts pull from the pool -- it is a planned opt-in, NOT in 1.0.
+retired scope be reused for a new item by setting its signals (no rebuild). This
+is the zero-GC default. [1.3] A by-value mapArray (item as a plain value) ships as
+an explicit opt-in: `mapArray(list, mapFn, { byValue: true })` -- a MOVE stays
+pool-flat (idxSig.set, no mapFn re-run) but an INSERT re-runs mapFn and pulls a
+fixed node count from the pool, because a by-value view bakes the item and cannot
+be redirected. See the [1.3] section.
 
 ## Entry points
 
@@ -118,5 +121,24 @@ NOT claimed:
   prefer effects/computeds (which ARE cascaded), or dispose it yourself.
 - Call mapArray/indexArray once at setup; reading the returned accessor is the
   reactive surface. Disposal is explicit (mapped.dispose()).
-- Deferred to a later minor: by-value mapArray, LIS minimal-move ordering (1.0
-  moves are correct but not minimal). Append/pop tail fast-paths shipped in 1.1.
+- Deferred to a later minor: LIS minimal-move ordering (1.0 moves are correct but
+  not minimal). Append/pop tail fast-paths shipped in 1.1; by-value mapArray
+  shipped in 1.3 (see the [1.3] section).
+
+## by-value mapArray [1.3]
+
+- Opt in with `mapArray(list, mapFn, { byValue: true })`. mapFn is called
+  `(item, index) => O` -- `item` is the PLAIN value (Solid-style), `index` is an
+  accessor. The by-accessor mode (byValue absent/false) is the zero-GC default and
+  is byte-for-byte unchanged.
+- Cost, stated at the call site: a MOVE (same item, new index) rides idxSig.set
+  with NO mapFn re-run -- reorders stay pool-flat. An INSERT re-runs mapFn exactly
+  once and pulls a fixed node count k from the pool (a by-value view bakes the item
+  in its closure -- there is no signal to redirect, so a parked scope cannot serve
+  a new item). Gated: the T6 phase-4 window pins k == 3 engine nodes/insert for the
+  1-effect fixture and 0 pool growth on a warm reorder.
+- Keys are the item by REFERENCE identity (SameValueZero): -0 and 0 are the same
+  key (not an item change); the same reference twice is a contained duplicate.
+- No free-list: removals dispose IMMEDIATELY, so `stats().parked` is always 0.
+- Door (fail closed, ASCII did-you-mean): `byValue + key`, `byValue + maxPool`, and
+  a truthy-non-true `byValue` each throw at creation.

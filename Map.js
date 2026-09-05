@@ -1,5 +1,5 @@
 /**
- * @zakkster/lite-map v1.2.0 -- zero-GC keyed list reconciliation for
+ * @zakkster/lite-map v1.3.0 -- zero-GC keyed list reconciliation for
  * @zakkster/lite-signal.
  * -----------------------------------------------------------------------------
  * Map a reactive array to per-item reactive scopes so that list mutation MOVES
@@ -24,9 +24,16 @@
  *       (no rebuild). `opts.key` selects the identity (default: reference).
  *
  * Both pass the CHANGING dimension as an accessor; that is what enables zero-GC
- * reuse. (A by-value `mapArray` -- item as a plain value, Solid-style -- is a
- * planned opt-in; it cannot reuse a retired scope for a new item without
- * re-running mapFn, so its inserts pull from the pool.)
+ * reuse. [1.3] `mapArray(list, mapFn, { byValue: true })` opts INTO plain-item
+ * ergonomics (Solid-style): mapFn receives `item` as a plain value and `index`
+ * as an accessor. A by-value view bakes the item into its closure -- no signal
+ * to redirect -- so a MOVE still rides idxSig.set with no mapFn re-run, but an
+ * INSERT re-runs mapFn and pulls a fixed node count from the pool (there is no
+ * reuse mechanism, so removals dispose immediately and `parked` is always 0).
+ * The door throws on `byValue + key`, `byValue + maxPool`, and a truthy-non-true
+ * `byValue`; keys are by REFERENCE identity (SameValueZero). The by-accessor
+ * mode (byValue absent/false) is the zero-GC default and is byte-for-byte
+ * unchanged by the opt-in.
  *
  * -- OWNERSHIP --
  * Each item owns a createScope() scope (1.6.0+): its mapFn's effects/computeds
@@ -204,6 +211,7 @@ export function createMapper(reg) {
      * @returns {(() => Array<unknown>) & { dispose: () => void }}
      */
     function mapArray(list, mapFn, opts) {
+        if (opts && opts.byValue) return mapArrayByValue(list, mapFn, opts);   // [1.3] cold dispatch; door lives in the byValue family
         const keyOf = (opts && opts.key) || ((item) => item);   // default: reference identity
         const maxPool = (opts && opts.maxPool) || Infinity;
         const byKey = new Map();   // key -> live slot (survivor lookup; mutated only on key change)
@@ -385,6 +393,176 @@ export function createMapper(reg) {
             byKey.clear();
             dispose(out);
             slots = []; scratch = []; pool.length = 0; o.length = 0;
+        };
+        read.stats = () => statsView;
+        return read;
+    }
+
+    // ---- mapArray: item-keyed (by-VALUE opt-in, [1.3]) -----------------------
+    //
+    // A sibling family selected ONCE at creation (the statsView pattern extended
+    // to a whole function set), so the accessor family above is byte-for-byte
+    // untouched. mapFn receives the PLAIN item and an index accessor; a view bakes
+    // the item into its closure, so there is NO itemSig and NO value-refresh line
+    // anywhere -- the four accessor refresh lines and the acquire rebind are
+    // ABSENT, not conditioned. Keys are the item by REFERENCE (SameValueZero).
+    //
+    // Cost contract (pinned by the T6 phase-4 gate): a MOVE rides idxSig.set with
+    // no mapFn re-run (pool-flat); an INSERT re-runs mapFn once and allocates a
+    // fixed node count k. The free-list cannot serve a byValue insert (a parked
+    // view is baked to its old item), so removals dispose IMMEDIATELY and
+    // `parked === 0` is an invariant (fact b).
+    /**
+     * @param {() => Array<unknown>} list
+     * @param {(item:unknown, index:() => number) => unknown} mapFn
+     * @param {{byValue:true}} opts
+     * @returns {(() => Array<unknown>) & { dispose: () => void }}
+     */
+    function mapArrayByValue(list, mapFn, opts) {
+        // ---- door (cold, fail closed, ASCII did-you-mean) --------------------
+        if (opts.byValue !== true) {
+            throw new TypeError("mapArray: opts.byValue must be exactly `true` to select " +
+                "by-value mode (a truthy non-true value is not a silent opt-in) -- did you mean { byValue: true }?");
+        }
+        if (opts.key !== undefined) {
+            throw new TypeError("mapArray: { byValue: true } cannot be combined with `key` -- a by-value " +
+                "view bakes the plain item and cannot absorb an item change under a stable custom key; " +
+                "byValue keys by reference identity. Drop `key`, or drop `byValue` for the accessor mode.");
+        }
+        if (opts.maxPool !== undefined) {
+            throw new TypeError("mapArray: { byValue: true } cannot be combined with `maxPool` -- a by-value " +
+                "insert cannot reuse a parked scope, so the free-list is never used (parked is always 0) and a " +
+                "cap on it is a silent no-op. Drop `maxPool`, or drop `byValue` for the accessor mode.");
+        }
+
+        const keyOf = (item) => item;   // by-value: the item IS the key (reference identity)
+        const byKey = new Map();         // key -> live slot (survivor lookup)
+        const pool = [];                 // ALWAYS empty (parked === 0 invariant); kept for statsView symmetry
+        let slots = [];
+        let scratch = [];
+        const o = [];
+        const out = signal(o, { equals: NEVER_EQUAL });
+        let epoch = 0;
+        let total = 0, highWater = 0;
+
+        // No itemSig: a plain item cannot be redirected. The view captures `item`
+        // in mapFn's closure; only idxSig exists (moves ride it).
+        const makeSlot = (item, index, key) => {
+            let slot;
+            createScope((disposeScope) => {
+                const idxSig = signal(index);
+                const view = mapFn(item, () => idxSig());
+                slot = { idxSig, view, dispose: disposeScope, key, index, item, seen: epoch };
+            });
+            total++; if (total > highWater) highWater = total;
+            return slot;
+        };
+
+        // Permanent teardown: cascade the scope, dispose the idxSig it did not
+        // adopt. There is no itemSig to dispose.
+        const disposeSlot = (s) => { s.dispose(); dispose(s.idxSig); total--; };
+
+        // A genuinely-new key ALWAYS builds (the free-list cannot serve byValue).
+        // `register` is false for a contained duplicate (same containment law as
+        // the accessor family).
+        const acquire = (item, index, key, register) => {
+            const s = makeSlot(item, index, key);
+            if (register) byKey.set(key, s);
+            return s;
+        };
+
+        // byValue retire = immediate disposeSlot (fact b: no parking).
+        const retire = (s) => {
+            if (byKey.get(s.key) === s) byKey.delete(s.key);
+            disposeSlot(s);
+        };
+
+        const reconcile = (arr) => {
+            epoch = (epoch + 1) | 0;
+            const n = arr.length;
+            const prevN = slots.length;
+
+            // Prefix classifier (kept). By-value keys ARE the items, so `===` here
+            // is the SameValueZero prefix scan: -0 and 0 match, so -0 <-> 0 is NOT
+            // an item change. The value-churn branch degrades to a seen-stamp loop
+            // (no refresh line -- nothing can change under a matched key).
+            const lim = n < prevN ? n : prevN;
+            let p = 0;
+            while (p < lim && keyOf(arr[p]) === slots[p].key) p++;
+
+            if (p === prevN && p === n) {
+                // Same keys, same order: pure no-op (a matched key IS the same
+                // item). Stamp seen for the general path's invariant; `out` silent.
+                for (let i = 0; i < n; i++) slots[i].seen = epoch;
+                return;
+            }
+            if (p === prevN && n > prevN) {
+                // Pure append: [prevN, n) is new tail. Each new row builds.
+                for (let i = 0; i < prevN; i++) slots[i].seen = epoch;
+                for (let i = prevN; i < n; i++) {
+                    const k = keyOf(arr[i]);
+                    slots[i] = acquire(arr[i], i, k, !byKey.has(k));
+                }
+                o.length = n;
+                for (let i = prevN; i < n; i++) o[i] = slots[i].view;
+                out.set(o);
+                return;
+            }
+            if (p === n && prevN > n) {
+                // Pure pop: old tail [n, prevN) disposes immediately (no parking).
+                for (let i = 0; i < n; i++) slots[i].seen = epoch;
+                for (let i = n; i < prevN; i++) retire(slots[i]);
+                slots.length = n;
+                o.length = n;
+                out.set(o);
+                return;
+            }
+
+            // ---- general keyed diff (prepend / reorder / middle insert-remove)
+            let changed = false;
+            for (let i = 0; i < n; i++) {
+                const item = arr[i];
+                const key = keyOf(item);
+                const existing = byKey.get(key);
+                if (existing !== undefined && existing.seen !== epoch) {   // survivor (moves ride idxSig)
+                    existing.seen = epoch;
+                    if (existing.index !== i) { existing.index = i; existing.idxSig.set(i); changed = true; }
+                    scratch[i] = existing;
+                } else {                                                    // new key (or duplicate): build
+                    scratch[i] = acquire(item, i, key, existing === undefined);
+                    changed = true;
+                }
+            }
+            for (let i = 0; i < slots.length; i++) {
+                const s = slots[i];
+                if (s.seen !== epoch) { retire(s); changed = true; }        // disposes immediately
+            }
+            scratch.length = n;
+            const tmp = slots; slots = scratch; scratch = tmp;
+            if (changed) {
+                o.length = n;
+                for (let i = 0; i < n; i++) o[i] = slots[i].view;
+                out.set(o);
+            }
+        };
+
+        let stopDriver;
+        createRoot(() => { stopDriver = effect(() => { const arr = list(); untrack(() => reconcile(arr)); }); });
+
+        // parked reads pool.length, which stays 0 for the life of a byValue list.
+        const statsView = Object.freeze({
+            get live() { return slots.length; },
+            get parked() { return pool.length; },
+            get highWater() { return highWater; },
+        });
+
+        const read = () => out();
+        read.dispose = () => {
+            stopDriver();
+            for (let i = 0; i < slots.length; i++) disposeSlot(slots[i]);
+            byKey.clear();
+            dispose(out);
+            slots = []; scratch = []; o.length = 0;
         };
         read.stats = () => statsView;
         return read;

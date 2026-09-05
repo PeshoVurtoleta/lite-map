@@ -32,8 +32,10 @@
  *   - C1 (M-04): LANDED. mapped.stats() upgraded validate()'s Pool line from the
  *     engine ledger to the exact { live, parked, highWater } line, kept alongside
  *     the ledger as a second witness. See makeValidator + poolLineHolds.
- *   - C2 (M-03): a byValue mapArray variant of T5/T6 -- moves stay pool-flat, only
- *     genuine inserts pull from the pool.
+ *   - C2 (M-03): LANDED. byValue mapArray opt-in lanes across t1/t5/t6/t7/t9 --
+ *     moves stay pool-flat, only genuine inserts pull from the pool, with the
+ *     exact-k insert-cost gate (T6 phase 4) and the parked===0 invariant
+ *     pinned throughout. See makeByValueMapFn + the byValue reconcile family.
  *   - C3 (M-01): the reorder index-signal floor probed in T6 (rotate-by-1 ==
  *     genuinely-moved) is the evidence the LIS milestone is already met at the
  *     reactive layer; C3 benches output-move cost against it.
@@ -230,6 +232,28 @@ export function makeMapFn(R, sidBox, idxRuns) {
         if (idxIsAccessor) {
             R.effect(() => { view.index = idxAcc(); if (idxRuns !== undefined) idxRuns.n++; });
         }
+        return view;
+    };
+}
+
+/**
+ * The by-value ([1.3]) counterpart of makeMapFn: mapFn receives the PLAIN item
+ * (baked into the view -- NO item effect, nothing to redirect) and an index
+ * accessor. `sidBox.n` doubles as a build counter (one increment per mapFn run),
+ * so a reorder that never re-runs mapFn leaves it flat while an insert bumps it
+ * by exactly one. Every invocation asserts A1 fail-closed: the item must NOT be a
+ * function (it is a plain value here, an accessor in makeMapFn).
+ * @param {object} R
+ * @param {{n:number}} sidBox   monotonic sid / build counter (mutated in place)
+ * @param {{n:number}} [idxRuns] optional index-effect rerun counter
+ */
+export function makeByValueMapFn(R, sidBox, idxRuns) {
+    return (item, idxAcc) => {
+        if (typeof item === 'function') {
+            die('harness: byValue mapFn received a FUNCTION item (expected a plain value -- A1)');
+        }
+        const view = { item, index: idxAcc(), sid: sidBox.n++ };
+        R.effect(() => { view.index = idxAcc(); if (idxRuns !== undefined) idxRuns.n++; });
         return view;
     };
 }

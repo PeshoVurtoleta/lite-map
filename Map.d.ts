@@ -66,6 +66,12 @@ export interface MapArrayOptions<T> {
      * (unbounded) today -- documented, not changed.
      */
     maxPool?: number;
+    /**
+     * By-value opt-in ([1.3]). Absent or `false` selects the by-accessor mode
+     * described here. Pass `true` to select the by-value overload (item as a plain
+     * value); that overload forbids `key` and `maxPool` at the type level.
+     */
+    byValue?: false;
 }
 
 /**
@@ -78,6 +84,20 @@ export function indexArray<T, O>(
     list: Accessor<readonly T[]>,
     mapFn: (item: Accessor<T>, index: number) => O,
     opts?: IndexArrayOptions,
+): Mapped<O>;
+
+/**
+ * ITEM-keyed mapping, BY-VALUE opt-in ([1.3]). `item` is the PLAIN value (Solid-
+ * style); `index` is an accessor. A MOVE rides the index signal with no mapFn
+ * re-run (pool-flat), but an INSERT re-runs mapFn and pulls a fixed node count
+ * from the pool -- there is no reuse mechanism, so removals dispose immediately
+ * and `stats().parked` is always 0. Keys are the item by REFERENCE identity
+ * (SameValueZero). `key` and `maxPool` are rejected at the door (and here: `never`).
+ */
+export function mapArray<T, O>(
+    list: Accessor<readonly T[]>,
+    mapFn: (item: T, index: Accessor<number>) => O,
+    opts: { byValue: true; key?: never; maxPool?: never },
 ): Mapped<O>;
 
 /**

@@ -212,6 +212,7 @@ teardown -- prefer effects/computeds (which are cascaded), or dispose it yoursel
 ```ts
 indexArray(list, (item: () => T, index: number) => O, opts?: { maxPool?: number }): Mapped<O>
 mapArray(list, (item: () => T, index: () => number) => O, opts?: { key?: (item: T) => unknown; maxPool?: number }): Mapped<O>
+mapArray(list, (item: T, index: () => number) => O, opts: { byValue: true }): Mapped<O>   // [1.3] plain-item opt-in
 createMapper(registry): { mapArray, indexArray }    // bind to a non-default registry
 
 // Mapped<O>:
@@ -256,12 +257,46 @@ if you need a point-in-time snapshot. After `dispose()` it pins
 
 ---
 
+## by-value `mapArray` (1.3)
+
+The default `mapArray` passes `item` as an accessor -- that is what lets a retired
+scope be **reused** for a new item (set its signals, no rebuild). Opt into
+**plain-item** ergonomics (Solid-style) with `{ byValue: true }`:
+
+```js
+const rows = mapArray(todos, (todo, index) => renderRow(todo, index()), { byValue: true });
+//                            ^^^^ PLAIN value            ^^^^^^^ index is still an accessor
+```
+
+A by-value view **bakes the item into `mapFn`'s closure**, so there is no signal to
+redirect it. The whole cost model follows from that one fact, and it is **stated at
+the call site**:
+
+| by-value operation | cost |
+| --- | --- |
+| **move / reorder** (same item, new index) | pool-flat -- rides `idxSig.set`, `mapFn` does **not** re-run |
+| **insert** (a new item) | re-runs `mapFn` **exactly once** and pulls a fixed node count `k` from the pool |
+| **remove** | disposes **immediately** -- there is no free-list, so `stats().parked` is always `0` |
+
+Gated (T6 phase 4): a warm 500-row reorder window shows `poolGrowths` /
+`totalAllocations` deltas **0** and zero `mapFn` re-runs; each insert allocates
+**exactly `k` engine nodes** (`k = 3` for a one-index-effect `mapFn`: the scope,
+the index signal, the index effect), calibrated once and asserted `==` on every
+insert, whether or not a scope was ever retired.
+
+- **Keys are by reference identity** (SameValueZero): `-0` and `0` are the same key
+  (not an item change); the **same reference twice** is a contained duplicate that
+  never evicts the owner's scope.
+- **The door fails closed** (ASCII, did-you-mean): `{ byValue: true }` cannot be
+  combined with `key` (a by-value view cannot absorb an item change under a custom
+  key) or `maxPool` (a cap on a free-list that is never used is a silent no-op);
+  a truthy non-`true` `byValue` throws too. The accessor mode (`byValue` absent or
+  `false`) is byte-for-byte unchanged.
+
+---
+
 ## Not in 1.0 (deferred)
 
-- **by-value `mapArray`** -- `item` as a plain value (Solid-style ergonomics). It
-  cannot reuse a parked scope for a new item without re-running `mapFn`, so its
-  inserts pull from the pool; it will ship as an opt-in, with the by-accessor mode
-  (this release) remaining the zero-GC default.
 - **LIS minimal-move ordering** -- 1.0 reorders are correct but not minimal (more
   index updates than the theoretical floor). A longest-increasing-subsequence pass to
   minimize moves is planned.

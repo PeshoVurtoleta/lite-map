@@ -20,7 +20,7 @@
 
 import {
     check, canon,
-    makeRegistry, makeMapFn, makeValidator,
+    makeRegistry, makeMapFn, makeByValueMapFn, makeValidator,
 } from './harness.mjs';
 
 const ids = (mapped) => mapped().map((v) => v.item.id);
@@ -201,6 +201,86 @@ export function run() {
         try { src.set(42); } catch (e) { threwNum = e instanceof TypeError; }
         check(threwNum, () => 'T1: a non-array (number) source did not throw a TypeError');
 
+        stop(); mapped.dispose(); R.dispose(src);
+    }
+
+    // --- byValue ([1.3]) door: fail closed, ASCII, did-you-mean --------------
+    {
+        const bvMapFn = makeByValueMapFn(R, sidBox);
+        const mk = (opts) => {
+            const s = R.signal([], { equals: () => false });
+            try { return reg.mapper.mapArray(s, bvMapFn, opts); }
+            finally { R.dispose(s); }
+        };
+        // byValue + key throws (message substrings pinned: byValue AND key).
+        let keyErr;
+        try { mk({ byValue: true, key: keyOf }); } catch (e) { keyErr = e; }
+        check(keyErr instanceof Error &&
+            keyErr.message.indexOf('byValue') !== -1 && keyErr.message.indexOf('key') !== -1,
+            () => 'T1: byValue+key did not throw the pinned door error -- ' + (keyErr && keyErr.message));
+        // byValue + maxPool throws (substrings: byValue AND maxPool).
+        let poolErr;
+        try { mk({ byValue: true, maxPool: 8 }); } catch (e) { poolErr = e; }
+        check(poolErr instanceof Error &&
+            poolErr.message.indexOf('byValue') !== -1 && poolErr.message.indexOf('maxPool') !== -1,
+            () => 'T1: byValue+maxPool did not throw the pinned door error -- ' + (poolErr && poolErr.message));
+        // truthy-non-true byValue throws (silent ignore is a law violation).
+        let truthyErr;
+        try { mk({ byValue: 1 }); } catch (e) { truthyErr = e; }
+        check(truthyErr instanceof Error && truthyErr.message.indexOf('byValue') !== -1,
+            () => 'T1: a truthy non-true byValue did not throw -- ' + (truthyErr && truthyErr.message));
+        // byValue: true ALONE does not throw.
+        let okThrew = false;
+        const s2 = R.signal([{ id: 'z' }], { equals: () => false });
+        let bvm;
+        try { bvm = reg.mapper.mapArray(s2, bvMapFn, { byValue: true }); } catch (e) { okThrew = true; }
+        check(!okThrew, () => 'T1: byValue: true alone threw at the door (expected accepted)');
+        bvm.dispose(); R.dispose(s2);
+    }
+
+    // --- byValue degenerate: empty/single, dup, -0<->0, stats { live, 0, hw } -
+    {
+        const bvKeyOf = (it) => it;
+        const validator = makeValidator(R, bvKeyOf, { maxPool: Infinity });
+        const bvMapFn = makeByValueMapFn(R, sidBox);
+        const A = { id: 'x' }, C = { id: 'y' };   // A used twice (same ref) => contained dup
+        const src = R.signal([], { equals: () => false });
+        const mapped = reg.mapper.mapArray(src, bvMapFn, { byValue: true });
+        const stop = R.effect(() => { void mapped(); });
+
+        validator.validate(mapped, [], 'T1 byValue empty');
+        src.set([A]);
+        validator.validate(mapped, [A], 'T1 byValue single');
+        const aView = mapped()[0];
+
+        src.set([A, A, C]);                        // same ref twice: contained duplicate
+        check(mapped().length === 3, () => 'T1: byValue dup length ' + mapped().length);
+        check(mapped()[0] === aView, () => 'T1: byValue contained duplicate evicted the owner view');
+        check(mapped.stats().parked === 0, () => 'T1: byValue dup parked=' + mapped.stats().parked + ' (expected 0)');
+
+        src.set([A, C]);                           // drop the dup only; A stays
+        check(mapped()[0] === aView, () => 'T1: byValue owner lost its view after the dup left');
+        const st = mapped.stats();
+        check(st.live === 2 && st.parked === 0,
+            () => 'T1: byValue stats {' + st.live + ',' + st.parked + '} (expected live=2, parked=0)');
+
+        stop(); mapped.dispose(); R.dispose(src);
+        validator.assertBase('T1 byValue degenerate');
+    }
+
+    // --- byValue -0 <-> 0 non-change pin (SameValueZero, no rebuild, no crash) -
+    {
+        const bvMapFn = makeByValueMapFn(R, sidBox);
+        const src = R.signal([-0], { equals: () => false });
+        const mapped = reg.mapper.mapArray(src, bvMapFn, { byValue: true });
+        const stop = R.effect(() => { void mapped(); });
+        const v0 = mapped()[0];
+        src.set([0]);                              // SameValueZero: NOT an item change
+        check(mapped()[0] === v0,
+            () => 'T1: byValue -0 -> 0 rebuilt the slot (expected no change under SameValueZero)');
+        check(Object.is(mapped()[0].item, -0),
+            () => 'T1: byValue -0/0 view did not retain the SameValueZero representative');
+        check(mapped.stats().parked === 0, () => 'T1: byValue -0/0 parked=' + mapped.stats().parked);
         stop(); mapped.dispose(); R.dispose(src);
     }
 }

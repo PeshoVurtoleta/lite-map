@@ -46,7 +46,7 @@
 
 import {
     check, die, breaking, controlTripped, controlDefeated,
-    makeRegistry, makeMapFn, makeValidator, isThrowRegistry, runOpsGate,
+    makeRegistry, makeMapFn, makeByValueMapFn, makeValidator, isThrowRegistry, runOpsGate,
 } from './harness.mjs';
 
 const N = 500;              // steady list length (high-water bar the churn stays under)
@@ -338,6 +338,142 @@ export function run() {
                 () => 'T6.3b(iv): indexArray regrow highWater=' + s.highWater + ' (expected 10 -- total-- proven)');
             stop(); mapped.dispose(); R.dispose(list);
         }
+    }
+
+    // ===== phase 4: byValue ([1.3]) -- reorder pool-flat + insert exact-k =====
+    // 4a is a measured window (moves never build); 4b is scripted, OUTSIDE any
+    // window (the insert cost pinned to a calibrated k). Accessor phases 1-3 are
+    // NOT edited (additions only). Strictly after them (one-measurement-at-a-time).
+    {
+        // --- 4a: a warm byValue reorder window is pool-flat -------------------
+        const reg = makeRegistry({ maxNodes: 1 << 14, maxLinks: 1 << 16, mode: 'throw' });
+        const R = reg.R;
+        const bvKeyOf = (r) => r;                 // byValue: item is the key
+        const sidBox = { n: 0 };                  // doubles as the mapFn build counter
+        const idxRuns = { n: 0 };
+        const mapFn = makeByValueMapFn(R, sidBox, idxRuns);
+        const validator = makeValidator(R, bvKeyOf, { maxPool: Infinity });
+
+        check(isThrowRegistry(reg),
+            () => 'T6.4: byValue window opened on a non-throw registry (mode=' + reg.mode + ')');
+
+        const rows = new Array(N);
+        for (let i = 0; i < N; i++) rows[i] = { id: i };
+        const model = rows.slice();
+        const src = R.signal(model, { equals: () => false });
+        const mapped = reg.mapper.mapArray(src, mapFn, { byValue: true });
+        const stop = R.effect(() => { void mapped(); });
+        src.set(model);
+        validator.validate(mapped, model, 'T6.4 byValue initial');
+        check(mapped.stats().parked === 0,
+            () => 'T6.4: byValue initial parked=' + mapped.stats().parked + ' (expected 0 -- no free-list)');
+
+        const hot = (i) => {                      // rotate-by-1 in place (pure reorder)
+            const h = model[0];
+            for (let k = 1; k < model.length; k++) model[k - 1] = model[k];
+            model[model.length - 1] = h;
+            src.set(model);
+        };
+        for (let i = 0; i < WARMUP; i++) hot(i);  // warm ICs + effects before the window
+
+        const buildsBefore = sidBox.n;
+        const b0 = R.stats();
+        const { report, summary } = runOpsGate(hot, { ops: OPS, warmup: 0 });
+        const b1 = R.stats();
+
+        const dGrow = b1.poolGrowths - b0.poolGrowths;
+        const dAlloc = b1.totalAllocations - b0.totalAllocations;
+        check(dGrow === 0, () => 'T6.4a: byValue reorder poolGrowths delta ' + dGrow + ' (expected 0)');
+        check(dAlloc === 0, () => 'T6.4a: byValue reorder totalAllocations delta ' + dAlloc +
+            ' (expected 0 -- a MOVE rides idxSig.set, it never builds)');
+        check(sidBox.n === buildsBefore, () => 'T6.4a: byValue reorder ran mapFn ' + (sidBox.n - buildsBefore) +
+            ' times (expected 0 -- moves never re-run mapFn)');
+        if (report.verdict !== 'pass') {
+            const g = summary.gc;
+            die('T6.4a byValue reorder verdict=' + report.verdict + ' (expected "pass") -- major=' + g.major +
+                ' maxMs=' + g.maxMs.toFixed(3) + ' abGrowth=' + summary.arrayBuffers.growthBytes);
+        }
+        check(mapped.stats().parked === 0,
+            () => 'T6.4a: byValue parked drifted to ' + mapped.stats().parked + ' (invariant: 0)');
+        validator.validate(mapped, model, 'T6.4 byValue post-window');
+        stop(); mapped.dispose(); R.dispose(src);
+        validator.assertBase('T6.4a byValue reorder');
+    }
+
+    {
+        // --- 4b: the insert cost pinned EXACTLY to k engine nodes ------------
+        const reg = makeRegistry({ maxNodes: 1 << 14, maxLinks: 1 << 16, mode: 'throw' });
+        const R = reg.R;
+        const sidBox = { n: 0 };
+        const mapFn = makeByValueMapFn(R, sidBox);
+        const model = [];
+        for (let i = 0; i < 4; i++) model.push({ id: i });
+        const src = R.signal(model.slice(), { equals: () => false });
+        const mapped = reg.mapper.mapArray(src, mapFn, { byValue: true });
+        const stop = R.effect(() => { void mapped(); });
+        src.set(model.slice());                   // build the warm 4-row base
+
+        // Each insert is a genuinely-new reference: it re-runs mapFn EXACTLY once
+        // and allocates EXACTLY k engine nodes. k is calibrated on the first insert
+        // (outside any measured window) and asserted == on every later one, whether
+        // or not a scope was ever retired (byValue has no reuse). Ceiling: 8 nodes
+        // for the 1-effect fixture (createScope + idxSig + one index effect).
+        let k = -1;
+        let prevHW = mapped.stats().highWater;
+        // (a) pure-growth inserts: each re-runs mapFn once, costs exactly k, and
+        // raises highWater by 1. k is calibrated on the first, asserted == after.
+        for (let ins = 0; ins < 4; ins++) {
+            const buildsBefore = sidBox.n;
+            const a0 = R.stats();
+            model.push({ id: 100 + ins });        // never-seen reference -> genuine insert
+            src.set(model.slice());
+            const a1 = R.stats();
+            const dAlloc = a1.totalAllocations - a0.totalAllocations;
+            const runs = sidBox.n - buildsBefore;
+            check(runs === 1, () => 'T6.4b: byValue insert #' + ins + ' ran mapFn ' + runs + ' times (expected exactly 1)');
+            if (k === -1) {
+                k = dAlloc;
+                check(k > 0 && k <= 8,
+                    () => 'T6.4b: calibrated k=' + k + ' out of range (expected 1..8 nodes for the 1-effect fixture)');
+            } else {
+                check(dAlloc === k,
+                    () => 'T6.4b: byValue insert #' + ins + ' allocated ' + dAlloc + ' nodes (expected exactly k=' + k + ')');
+            }
+            const st = mapped.stats();
+            check(st.highWater === prevHW + 1,
+                () => 'T6.4b: insert #' + ins + ' highWater ' + prevHW + ' -> ' + st.highWater + ' (expected +1)');
+            check(st.parked === 0, () => 'T6.4b: byValue parked=' + st.parked + ' (expected 0 -- no pool)');
+            prevHW = st.highWater;
+        }
+
+        // (b) retire-then-insert: a removal disposes IMMEDIATELY (parked stays 0);
+        // the follow-up insert of a NEW reference under the peak STILL costs exactly
+        // k (byValue never reuses a retired scope) and does NOT raise highWater.
+        model.pop();
+        src.set(model.slice());
+        check(mapped.stats().parked === 0,
+            () => 'T6.4b: byValue removal left parked=' + mapped.stats().parked + ' (expected 0 -- immediate dispose)');
+        const hwAfterPop = mapped.stats().highWater;
+        {
+            const buildsBefore = sidBox.n;
+            const a0 = R.stats();
+            model.push({ id: 999 });              // genuine new ref, but back-fills under the peak
+            src.set(model.slice());
+            const a1 = R.stats();
+            const dAlloc = a1.totalAllocations - a0.totalAllocations;
+            check(sidBox.n - buildsBefore === 1,
+                () => 'T6.4b: insert after a retire ran mapFn ' + (sidBox.n - buildsBefore) + ' times (expected exactly 1)');
+            check(dAlloc === k,
+                () => 'T6.4b: insert after a retire allocated ' + dAlloc + ' nodes (expected exactly k=' + k +
+                    ' -- byValue never reuses, the cost is constant)');
+            check(mapped.stats().highWater === hwAfterPop,
+                () => 'T6.4b: back-fill under the peak raised highWater to ' + mapped.stats().highWater +
+                    ' (expected unchanged ' + hwAfterPop + ')');
+            check(mapped.stats().parked === 0, () => 'T6.4b: byValue parked=' + mapped.stats().parked + ' (expected 0)');
+        }
+
+        stop(); mapped.dispose(); R.dispose(src);
+        gcMetrics.k = k;
     }
 
     return { gc: gcMetrics };

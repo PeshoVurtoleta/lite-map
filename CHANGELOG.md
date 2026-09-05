@@ -4,6 +4,52 @@ All notable changes to `@zakkster/lite-map` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] -- 2026-09-05
+
+By-value `mapArray` (M-03), an explicit opt-in. `mapArray(list, mapFn, { byValue:
+true })` calls `mapFn` with the PLAIN item (Solid-style) and an index accessor. The
+by-accessor mode (byValue absent/false) is the zero-GC default and is byte-for-byte
+unchanged -- a sibling reconcile family is selected once at creation, so the
+accessor function bodies gain exactly one dispatch line and nothing else.
+
+### Added -- `{ byValue: true }` on `mapArray`
+
+- **Plain-item mapFn.** `mapFn(item, index)` receives `item` as the value itself
+  (no `item()` call) and `index` as an accessor. Keys are the item by REFERENCE
+  identity (SameValueZero): `-0` and `0` are the same key (not an item change), and
+  the same reference twice is a contained duplicate that never evicts the owner.
+- **Cost, pinned at the call site.** A by-value view bakes the item into its
+  closure, so there is no signal to redirect it: a MOVE (same item, new index)
+  rides `idxSig.set` with NO `mapFn` re-run (pool-flat), but an INSERT re-runs
+  `mapFn` exactly once and pulls a fixed **`k = 3` engine nodes** (the scope, the
+  index signal, one index effect for the fixture mapFn) from the pool. Gated (T6
+  phase 4): the warm-reorder window shows `poolGrowths` / `totalAllocations` deltas
+  **0** with zero `mapFn` re-runs; `k` is calibrated once and asserted `==` on every
+  insert, whether or not a scope was retired, under a hard ceiling of 8 nodes.
+- **No free-list.** A parked by-value view is baked to its old item and can never
+  serve a new one, so removals dispose IMMEDIATELY and `stats().parked` is always
+  `0` (a by-value invariant). `stats()` otherwise reads `{ live, 0, highWater }`
+  identically -- the replace-all `prevN + n` transient is still recorded.
+- **Door (fail closed, ASCII, did-you-mean).** `{ byValue: true }` throws at
+  creation when combined with `key` or `maxPool`, and when `byValue` is truthy but
+  not exactly `true` (no silent ignore). Unknown-key validation for the accessor
+  mode remains a registered, separate gap.
+- **Types.** A `mapArray` overload ordered first -- `{ byValue: true; key?: never;
+  maxPool?: never }` with `mapFn: (item: T, index: Accessor<number>) => O` -- so a
+  literal `byValue: true` selects the plain-item mapFn type and the door rejections
+  are visible at the type level.
+
+### Changed -- torture harness (no new tier files)
+
+- `makeByValueMapFn` (plain-item fixture, build counter); T5 gains a by-value
+  differential lane (same oracle, reference keys, duplicate-object + `-0`/`0`
+  shapes, `parked === 0` and `poolGrowths` delta 0 asserted); T6 gains phase 4
+  (warm reorder pool-flat + insert exact-`k`); T1 gains the door cases and the
+  by-value degenerate/`-0`<->`0` pins; T7 gains a 4096-cycle by-value soak (leak
+  size back to 0, post-dispose `{ 0, 0, peak }` per cycle); T9 gains controls (h)
+  (park-and-rebind staleness caught by the differential) and (i) (a doorless
+  variant caught by the door pin). `test/byvalue_test.mjs` adds 6 `node:test` cases.
+
 ## [1.2.0] -- 2026-09-05
 
 Pool observability (M-04), purely additive: a mapped list gains a read surface.

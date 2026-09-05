@@ -29,7 +29,7 @@
 
 import {
     check, breaking,
-    makeRegistry, makeMapFn, makeValidator,
+    makeRegistry, makeMapFn, makeByValueMapFn, makeValidator,
 } from './harness.mjs';
 import { createLeakTracker, createOwnerCascadeOrphanKernel } from '@zakkster/lite-leak';
 
@@ -113,6 +113,52 @@ export async function run() {
         // Ledger conservation: every node the mappers took is back in the pool,
         // and the pool did not drift up (parked bounded by maxPool).
         validator.assertBase('T7 cycle ' + c);
+    }
+
+    // ---- byValue soak ([1.3]): same retention + conservation discipline -------
+    // A byValue view bakes the plain item, so a scope that outlives dispose() keeps
+    // its item reachable exactly as the accessor itemSig does -- the same lite-leak
+    // witness applies. Pure moves (reverse/rotate) never build; one value churn
+    // exercises the immediate-dispose retire path. parked stays 0 every cycle.
+    const bvValidator = makeValidator(R, (it) => it, { maxPool: Infinity });
+    for (let c = 0; c < CYCLES; c++) {
+        const items = new Array(ROWS);
+        for (let k = 0; k < ROWS; k++) items[k] = { id: k, v: c };
+
+        const src = R.signal(items.slice(), { equals: () => false });
+        const mapped = reg.mapper.mapArray(src, makeByValueMapFn(R, sidBox), { byValue: true });
+        const stop = R.effect(() => { void mapped(); });
+
+        src.set(items.slice().reverse());                 // move
+        src.set(items.slice(1).concat(items[0]));         // move
+        const churned = items.slice();
+        churned[3] = { id: 3, v: c + 1 };                 // new ref: insert + immediate retire
+        src.set(churned);
+        src.set(items.slice());                           // items[3] is a new key again -> rebuild
+        bvValidator.resetIdentity();
+        bvValidator.validate(mapped, items, 'T7 byValue cycle ' + c);
+
+        const st = mapped.stats();
+        check(st.live === ROWS,
+            () => 'T7 byValue cycle ' + c + ': stats live=' + st.live + ' (expected ' + ROWS + ')');
+        check(st.parked === 0,
+            () => 'T7 byValue cycle ' + c + ': parked=' + st.parked + ' (byValue invariant: 0)');
+        const hwBefore = st.highWater;
+
+        const witnessItem = items[ROWS - 1];
+        tracker.track(witnessItem, () => {}, 'bv#' + c);
+        if (armed) held.push(witnessItem);
+
+        stop();
+        mapped.dispose();
+        R.dispose(src);
+        check(st.live === 0 && st.parked === 0,
+            () => 'T7 byValue cycle ' + c + ': post-dispose stats not zeroed -- live=' + st.live +
+                ' parked=' + st.parked);
+        check(st.highWater === hwBefore,
+            () => 'T7 byValue cycle ' + c + ': post-dispose highWater=' + st.highWater +
+                ' (expected historical ' + hwBefore + ')');
+        bvValidator.assertBase('T7 byValue cycle ' + c);
     }
 
     // Settle passes OUTSIDE any measured window: GC + macrotask yield so the FR

@@ -209,6 +209,61 @@ export function run() {
         }
     }
 
+    // --- (h) byValue park-and-rebind staleness caught by the T5 differential --
+    // A byValue view bakes the plain item; a park-and-rebind BUG would reuse a slot
+    // for a new item WITHOUT redirecting the baked view (there is no signal to set),
+    // leaving a stale item where a new key is expected. The differential's Order
+    // line -- canon(keyOf(view.item)) === canon(arr[i]) -- is exactly what catches
+    // it. Prove the comparison discriminates in both directions.
+    {
+        const idKey = (it) => it;                 // byValue: the item IS the key
+        const A = { id: 'a' }, B = { id: 'b' };
+        // A CORRECT view holds the current item: the Order line passes.
+        const goodView = { item: B, index: 0 };
+        if (canon(idKey(goodView.item)) !== canon(idKey(B))) {
+            controlDefeated('T9(h): the byValue differential false-negatived a correct view ' +
+                '(the Order line rejected a live plain item)');
+        }
+        // A STALE view (reused-but-not-redirected, still holding A) MUST be rejected
+        // where B is now expected -- a park-and-rebind regression the differential bites.
+        const staleView = { item: A, index: 0 };
+        if (canon(idKey(staleView.item)) === canon(idKey(B))) {
+            controlDefeated('T9(h): the byValue differential MISSED a stale plain item -- a park-and-rebind ' +
+                'reused a slot without redirecting the baked view and the Order line passed (vacuous)');
+        }
+    }
+
+    // --- (i) a doorless byValue variant caught by the T1 door pin -------------
+    // The REAL door rejects byValue+key and byValue+maxPool (a byValue view cannot
+    // absorb an item change under a custom key, and its free-list is never used). A
+    // doorless variant would accept them. Prove the door discriminates: it REJECTS
+    // the two illegal combos and ACCEPTS the legal opt-in (so the T1 pin is not
+    // vacuous "throws always").
+    {
+        const mk = (opts) => {
+            const reg = makeRegistry({ maxNodes: 64, maxLinks: 256, mode: 'throw' });
+            const src = reg.R.signal([], { equals: () => false });
+            return reg.mapper.mapArray(src, (item, i) => ({ item, index: i() }), opts);
+        };
+        let keyThrew = false;
+        try { mk({ byValue: true, key: (x) => x }); } catch (e) { keyThrew = true; }
+        if (!keyThrew) {
+            controlDefeated('T9(i): byValue + key was ACCEPTED (a doorless variant) -- the T1 door pin is vacuous');
+        }
+        let poolThrew = false;
+        try { mk({ byValue: true, maxPool: 4 }); } catch (e) { poolThrew = true; }
+        if (!poolThrew) {
+            controlDefeated('T9(i): byValue + maxPool was ACCEPTED (a doorless variant)');
+        }
+        let okThrew = false;
+        let m;
+        try { m = mk({ byValue: true }); } catch (e) { okThrew = true; }
+        if (okThrew) {
+            controlDefeated('T9(i): the door threw on a valid { byValue: true } opt-in -- the T1 pin would false-fail');
+        }
+        m.dispose();
+    }
+
     // A silent guard against a no-op tier: if control (a)'s guard ever stopped
     // discriminating, the checks above would have exited. Reaching here means
     // every gate demonstrably caught its injected fault.
