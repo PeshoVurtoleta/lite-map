@@ -4,6 +4,49 @@ All notable changes to `@zakkster/lite-map` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] -- 2026-09-05
+
+NO RUNTIME CHANGE: Map.js differs from 1.4.0 (0f92d70) only in the version
+header line; Map.d.ts and every test/ file are byte-identical (no API, no
+behavior change). This release carries the M-05 closure record, its bench, and
+the session's registry re-check. A head fast-path WAS implemented and reverted
+inside the session per its own decision gate -- see the 0003 amendment below.
+Session facts recorded per the C4 plan:
+- M-06 STAYS OPEN (re-verified 2026-09-05, C4): the registry still has no
+  exact stable lite-signal 1.6.0 in versions[] (latest 1.5.0; beta dist-tag ->
+  1.6.0-beta-1, the dev pin; highest 1.6.x prerelease by semver precedence
+  1.6.0-preview.2; the rc dist-tag points at 1.5.0-rc.2, the 1.5 line). A
+  future 1.6.0-rc.* does NOT trip the "^1.6.0" narrowing -- only an exact
+  stable does. Pins stay peer "^1.6.0-beta-1" / devDep "1.6.0-beta-1",
+  byte-identical to 1.4.0.
+- fact-12 re-probe (lite-signal 1.6.0-beta-1): re-entrant set reflects synchronously = yes
+  (matches the C3 observation on the same build; still UNSTABLE across builds
+  -- C2 observed the opposite -- so re-probe per session, rely on neither).
+
+### Added
+- `bench/head-probe.mjs` + dev script `bench:head` (repo-only; `bench/` is not
+  in `files[]` -- the tarball is unchanged at 7 files). The M-05 head fast-path
+  decision probe: shapes prepend / shift / head-cycle at n=100 and n=1000 on
+  lite-signal 1.6.0-beta-1, with one index effect per row. ANALYTIC columns
+  (idxSets measured live; oStores / byKeyGets / retireScan derived, source-
+  anchored, fail-closed: an unclassifiable row exits 1, anchor drift exits 2)
+  are two-run byte-identical; TIMED columns are medians + spread, excluded
+  from the determinism check. Measured: H-1 stage 1 (inherent-ops twin)
+  shareUpper 0.581 / 0.441 (n=100 / n=1000); stage 2 (faithful bench-side
+  prototype) shareProto 0.417 / 0.334; bar 0.25 -- H-1 cleared both stages.
+- `decisions/0003-head-fast-path.md` (repo-only): choice A (SHIP, conditional
+  on H-2 / H-3 / R3) at decision time, AMENDED SAME DAY to B. The implemented
+  law-5 head fast-path ran the full torture gate green (which per the
+  decision's own clause (c) proves semantics and zero-alloc only, never the
+  win), and the R3 re-measure of the SHIPPED path against a near-head
+  general-path proxy fell below the 0.25 share bar at n=1000: the prototype
+  had identified survivors positionally, skipping the per-row byKey.get a
+  correct path cannot skip (duplicate-key disambiguation, retire ownership),
+  and that correctness tax consumes the n=1000 margin (0.334 - 0.25). Map.js
+  was reverted byte-identical per the condition clause; M-05 is CLOSED
+  without a head fast-path -- head shapes keep riding the general keyed diff,
+  whose idxSig fan-out + full o[] rewrite are inherent to a head mutation.
+
 ## [1.4.0] -- 2026-09-05
 
 NO RUNTIME CHANGE: Map.js differs from 1.3.0 only in the version header line,

@@ -1,5 +1,5 @@
 /**
- * @zakkster/lite-map v1.4.0 -- zero-GC keyed list reconciliation for
+ * @zakkster/lite-map v1.4.1 -- zero-GC keyed list reconciliation for
  * @zakkster/lite-signal.
  * -----------------------------------------------------------------------------
  * Map a reactive array to per-item reactive scopes so that list mutation MOVES
