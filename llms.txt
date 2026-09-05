@@ -121,9 +121,14 @@ NOT claimed:
   prefer effects/computeds (which ARE cascaded), or dispose it yourself.
 - Call mapArray/indexArray once at setup; reading the returned accessor is the
   reactive surface. Disposal is explicit (mapped.dispose()).
-- Deferred to a later minor: LIS minimal-move ordering (1.0 moves are correct but
-  not minimal). Append/pop tail fast-paths shipped in 1.1; by-value mapArray
-  shipped in 1.3 (see the [1.3] section).
+- LIS minimal-move ordering: documented as met (decisions/0002-lis-ordering.md).
+  Reorders are already index-signal-minimal (idxSig.set fires only on genuinely-
+  moved rows: rotate-1000 -> moved 1000, adjacent swap -> 2, gated in T6). The
+  classic n - LIS is a move-op floor; the positionally-indexed mapped() output has
+  store floor n - redundant (redundant == n - moved), a different quantity an LIS
+  pass does not reach (bench/lis-probe.mjs: redundant/n >= 0.50 on only 1/5 shapes),
+  so no LIS guard ships in the hot path. Append/pop tail fast-paths shipped in 1.1;
+  by-value mapArray shipped in 1.3 (see the [1.3] section).
 
 ## by-value mapArray [1.3]
 

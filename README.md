@@ -297,9 +297,18 @@ insert, whether or not a scope was ever retired.
 
 ## Not in 1.0 (deferred)
 
-- **LIS minimal-move ordering** -- 1.0 reorders are correct but not minimal (more
-  index updates than the theoretical floor). A longest-increasing-subsequence pass to
-  minimize moves is planned.
+- **LIS minimal-move ordering** -- documented as met (see
+  `decisions/0002-lis-ordering.md`). Reorders are already index-signal-minimal:
+  `idxSig.set` fires only for a survivor whose index actually changed, so index
+  updates equal the genuinely-moved rows (`moved` on a 1000-row rotate = 1000, an
+  adjacent swap = 2; gated in the torture T6 tier). The classic `n - LIS` floor is
+  a MOVE-operation count for an insertion-ordered container; the output array
+  `mapped()` is positionally indexed, so its store floor is `n - redundant`
+  (`redundant == n - moved`), a different quantity that an LIS pass does not reach
+  (`bench/lis-probe.mjs`: `redundant/n >= 0.50` on only 1 of 5 shapes). An
+  unconditional LIS guard in the reconcile hot path is therefore not justified;
+  output-move minimization is a consumer concern. Numbers and the full rationale:
+  `decisions/0002-lis-ordering.md`.
 
 ---
 

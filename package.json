@@ -29,7 +29,8 @@
     "torture:controls": "node test/controls.mjs",
     "verify": "npm test && npm run torture && npm run torture:controls",
     "prepublishOnly": "npm run verify",
-    "fuzz:bench": "node bench/torture/maparray-fuzzer.mjs"
+    "fuzz:bench": "node bench/torture/maparray-fuzzer.mjs",
+    "bench:lis": "node bench/lis-probe.mjs"
   },
   "peerDependencies": {
     "@zakkster/lite-signal": "^1.6.0-preview.2"

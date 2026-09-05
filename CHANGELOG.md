@@ -4,6 +4,42 @@ All notable changes to `@zakkster/lite-map` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] -- unreleased
+
+DOCS-ONLY: Map.js and Map.d.ts are byte-identical to 1.3.0 (no API, no
+behavior change). Session facts recorded here per the C3 plan:
+- M-06 STAYS OPEN: as of 2026-09-05 the registry has no stable lite-signal
+  >= 1.6.0 (latest 1.5.0; beta dist-tag -> 1.6.0-beta-1, the dev pin;
+  highest 1.6.x prerelease 1.6.0-preview.2), so peerDependencies stays
+  "^1.6.0-preview.2" and the dev pin stays 1.6.0-beta-1. Re-verify the
+  export union and the full gate when stable 1.6.0 ships, then floor both
+  pins to "^1.6.0".
+- fact-12 re-probe (lite-signal 1.6.0-beta-1): re-entrant set reflects synchronously = yes
+  (differs from the observation registered at C2; non-gating, lite-signal's
+  concern, re-probe on stable 1.6.0).
+
+### Added
+- `bench/lis-probe.mjs` + dev script `bench:lis` (repo-only; `bench/` is not
+  in `files[]` -- the tarball is unchanged at 7 files). Deterministic 5-shape
+  probe (seed 0x9e3779b9, n=1000) measuring per reorder shape: idxSig.set
+  writes (moved), output-array slot stores, the classic `n - LIS` move floor,
+  and `redundant = n - moved`. Measured on lite-signal 1.6.0-beta-1: moved
+  rotate=1000 / reverse=1000 / shuffle=998 / adjacent-swap=2 /
+  moves-25pct=929; redundant 0 / 0 / 2 / 998 / 71; n-LIS 1 / 999 / 941 / 1 /
+  226.
+- `decisions/0002-lis-ordering.md` (repo-only): M-01 (LIS minimal-move)
+  closed as DOCUMENTED AS MET on criterion A-1 (`redundant/n >= 0.50` on only
+  1/5 shapes). `n - LIS` is a move-operation floor for insertion-ordered
+  containers; the positionally-indexed `mapped()` output has store floor
+  `n - redundant`, and the recoverable cost is idempotent plain stores into
+  one persistent array -- invisible to every zero-GC witness this package
+  owns.
+
+### Changed
+- README "Not in 1.0" and the llms.txt gotcha: the LIS bullet no longer
+  promises a planned pass; it records the measured numbers and points at
+  `decisions/0002-lis-ordering.md`.
+
 ## [1.3.0] -- 2026-09-05
 
 By-value `mapArray` (M-03), an explicit opt-in. `mapArray(list, mapFn, { byValue:
