@@ -10,10 +10,12 @@ DOCS-ONLY: Map.js and Map.d.ts are byte-identical to 1.3.0 (no API, no
 behavior change). Session facts recorded here per the C3 plan:
 - M-06 STAYS OPEN: as of 2026-09-05 the registry has no stable lite-signal
   >= 1.6.0 (latest 1.5.0; beta dist-tag -> 1.6.0-beta-1, the dev pin;
-  highest 1.6.x prerelease 1.6.0-preview.2), so peerDependencies stays
-  "^1.6.0-preview.2" and the dev pin stays 1.6.0-beta-1. Re-verify the
-  export union and the full gate when stable 1.6.0 ships, then floor both
-  pins to "^1.6.0".
+  highest 1.6.x prerelease 1.6.0-preview.2), so the stable "^1.6.0" floor
+  cannot land and the dev pin stays 1.6.0-beta-1. The PEER floor moved
+  same-day to "^1.6.0-beta-1" by author correction (see the peer-floor
+  Changed entry below) -- to the tested prerelease, not to any stable.
+  Re-verify the export union and the full gate when stable 1.6.0 ships,
+  then floor both pins to "^1.6.0".
 - fact-12 re-probe (lite-signal 1.6.0-beta-1): re-entrant set reflects synchronously = yes
   (differs from the observation registered at C2; non-gating, lite-signal's
   concern, re-probe on stable 1.6.0).
@@ -39,6 +41,36 @@ behavior change). Session facts recorded here per the C3 plan:
 - README "Not in 1.0" and the llms.txt gotcha: the LIS bullet no longer
   promises a planned pass; it records the measured numbers and points at
   `decisions/0002-lis-ordering.md`.
+
+### Changed -- peer floor corrected to the build the suite actually runs against
+
+- **`peerDependencies`: `@zakkster/lite-signal` `^1.6.0-preview.2` ->
+  `^1.6.0-beta-1`** (amends M-06's interim pin; the planned `^1.6.0` narrowing
+  once a stable ships is unchanged). `1.6.0-beta-1` is the registry's current
+  `1.6.0` head (dist-tag `beta`) and the dev pin the test suite has run against
+  since 1.1.1 (the closest build exporting BOTH `createScope` and `getOwner`,
+  which the lite-leak witness needs) -- but semver compares prerelease
+  identifiers lexically, so `beta-1` sorts BELOW `preview.2` and the tested
+  build did not satisfy the published range. That was lite-map's own share of
+  1.1.1's documented `--legacy-peer-deps` wart; with the floor at
+  `^1.6.0-beta-1` the dev pin satisfies lite-map's peer (npm's ERESOLVE report
+  no longer lists a lite-map edge). A full dev install STILL needs
+  `--legacy-peer-deps` for one upstream edge: `lite-leak@1.10.0` peers on
+  lite-signal `>=1.5.0-beta.3 <2.0.0`, and npm's same-tuple prerelease rule
+  admits no `1.6.0-*` prerelease into that range (`rc.*` included) -- stable
+  `1.6.0` does satisfy it, so the residue clears at the stable `^1.6.0`
+  re-pin (M-06), or earlier if lite-leak widens its peer with
+  `|| >=1.6.0-0 <2.0.0`.
+  (`lite-gc-profiler@1.16.0` declares no peers -- lite-leak is the only edge.)
+- Range facts (checked against npm's semver): `^1.6.0-beta-1` admits `beta-1`,
+  `preview.0..2` (a side effect of the same lexical ordering; every preview
+  carries `createScope`, the one primitive lite-map is built on), the imminent
+  `1.6.0-rc.*`, and stable `1.6.0` -- the announced rc promotion therefore
+  needs no further range change. `alpha.*`, `beta`, and `beta-0` sort below the
+  floor and stay excluded.
+- Docs state the same floor: `llms.txt` (peer line + the `createMapper` entry),
+  README's peer blockquote, and the harness note in
+  `test/harness_map_test.mjs`. `Map.js` is byte-identical -- no runtime change.
 
 ## [1.3.0] -- 2026-09-05
 

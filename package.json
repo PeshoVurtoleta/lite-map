@@ -33,7 +33,7 @@
     "bench:lis": "node bench/lis-probe.mjs"
   },
   "peerDependencies": {
-    "@zakkster/lite-signal": "^1.6.0-preview.2"
+    "@zakkster/lite-signal": "^1.6.0-beta-1"
   },
   "keywords": [
     "reactive",

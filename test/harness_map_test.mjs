@@ -17,7 +17,7 @@
 // Modeled on map_test.mjs's trackingMapFn/sids oracle and DEFAULT registry
 // throughout (no createRegistry -> no cross-registry tracking pitfalls).
 //
-// NOTE: requires lite-signal >=1.6.0-preview.0 (createScope); run once that is
+// NOTE: requires lite-signal >=1.6.0-beta-1 (createScope); run once that is
 // available. Syntax-validated only here -- not executed.
 
 import { test } from "node:test";

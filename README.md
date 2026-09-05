@@ -30,7 +30,7 @@ primitive itself.
 npm install @zakkster/lite-map
 ```
 
-> **Peer dependency:** `@zakkster/lite-signal` `^1.6.0-preview.0`. lite-map is built
+> **Peer dependency:** `@zakkster/lite-signal` `^1.6.0-beta-1`. lite-map is built
 > on `createScope` -- the detached per-item-subtree disposal primitive introduced in
 > `1.6.0-preview.0`. ESM only. MIT.
 
